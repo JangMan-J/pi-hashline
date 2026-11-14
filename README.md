@@ -1,17 +1,36 @@
 # pi-hashline
 
-`oh-my-pi`'s native Rust `hashline` edit engine (`@oh-my-pi/pi-natives` N-API addon, MIT) packaged as a Pi extension.
+`oh-my-pi`'s native Rust `hashline` edit engine (`@oh-my-pi/pi-natives` N-API addon, MIT) packaged as a Pi extension, with a user-editable routing config (`~/.pi/agent/hashline.json`) and a fast deterministic calibrator (`calibrate.mjs`).
 
 Instead of echoing `oldText` and matching whitespace, `read` prefixes text files with a 4-hex snapshot header (`[path#TAG]`) and `LINE:TEXT` numbers, and `hashline_edit` applies line-span (`PUT N.=M:`), syntax-block (`PUT N*:`), gap-insert (`PUT <N:`, `PUT >N:`, `PUT >$:`), register cut/paste (`CUT ... @name`), move (`MV`), and delete (`REM`) patches directly in Rust.
 
-## Mode routing (`PI_HASHLINE` or `/hashline`)
+## Configuration (`~/.pi/agent/hashline.json`)
 
-- `auto` (default): swaps `edit` -> `hashline_edit` on Gemini (`google/*`, `google-vertex/*`, `antigravity/gemini-*`) and OpenAI (`openai/*`, `openai-codex/*`, excluding `spark`), keeping stock `edit(oldText, newText)` on Claude, Kimi, DeepSeek, MiniMax, and Qwen.
-- `all`: enables `hashline_edit` on Claude as well.
-- `force`: enables `hashline_edit` on every model.
-- `off`: disables `hashline_edit` everywhere.
+Created automatically on first load (override path with `PI_HASHLINE_CONFIG`). Routing precedence in `auto` mode:
 
-Call telemetry is appended to `~/.pi/agent/hashline-stats.jsonl` (`/hashline stats`).
+1. **Pinned rules** (`"pinned": true` in `rules` — hand-edited or set via `/hashline pin <hashline|replace> [glob]`)
+2. **Calibrated results** (`calibrated["provider/model"]` written by `calibrate.mjs`)
+3. **Family/model glob rules** (`rules`, longest match wins, e.g. `*gemini*`, `openai-codex/*`, `anthropic/*`, `kimi*`)
+4. **`defaultUse`** (`"replace"` or `"hashline"`)
+
+Runtime overrides (`PI_HASHLINE` env var or `/hashline` command):
+- `/hashline` — show active decision and rule/calibration source for the current model
+- `/hashline pin <hashline|replace> [provider/model-glob]` — pin a model or family in `hashline.json`
+- `/hashline auto | all | force | off` — switch session override mode
+- `/hashline stats` — summarize recorded calls from `~/.pi/agent/hashline-stats.jsonl`
+
+## Deterministic Calibrator (`calibrate.mjs`)
+
+Runs two bash-free, 2-turn (`read` -> `edit`) multi-hunk refactoring micro-tasks head-to-head (`replace` vs `hashline`, starting both arms simultaneously per task and verifying output with strict Node assertions in `<20 ms`), then writes each model's measured verdict, speedup, and payload byte ratio into `~/.pi/agent/hashline.json`:
+
+```sh
+# Calibrate default roster across major provider families (~45-90s total)
+node calibrate.mjs
+
+# Calibrate specific models or preview without writing hashline.json
+node calibrate.mjs openai-codex/gpt-6-astra kimi-coding/k3.1-pro-highspeed
+node calibrate.mjs --thinking high --min-speedup 1.15 --dry-run
+```
 
 ## Verify & benchmark
 

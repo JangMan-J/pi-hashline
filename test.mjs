@@ -18,11 +18,15 @@ const jiti = createJiti(import.meta.url, {
 	},
 });
 
+const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-hl-test-"));
+process.env.PI_CODING_AGENT_DIR = path.join(tmp, "agent");
+
 const mod = await jiti.import(path.resolve("index.ts"));
+const cfgMod = await jiti.import(path.resolve("config.ts"));
 const ext = mod.default;
 const { shouldUseHashline } = mod;
 
-// 1. Model-family auto routing
+// 1. Model-family auto routing + pinned/calibrated precedence in hashline.json
 assert.equal(shouldUseHashline("auto", { provider: "antigravity", id: "gemini-4-carbon" }), true);
 assert.equal(shouldUseHashline("auto", { provider: "google", id: "gemini-4-argon" }), true);
 assert.equal(shouldUseHashline("auto", { provider: "openai-codex", id: "gpt-6-astra" }), true);
@@ -31,9 +35,33 @@ assert.equal(shouldUseHashline("auto", { provider: "kimi-coding", id: "k3.1-pro-
 assert.equal(shouldUseHashline("all", { provider: "anthropic", id: "claude-opus-5-5" }), true);
 assert.equal(shouldUseHashline("all", { provider: "kimi-coding", id: "k3.1-pro-highspeed" }), false);
 
+// Calibrated entry overrides unpinned family wildcard, and pinned rule overrides calibrated entry
+const customCfg = cfgMod.loadConfigSync(process.env.PI_CODING_AGENT_DIR);
+customCfg.calibrated["kimi-coding/k3.1-pro-highspeed"] = {
+	use: "hashline",
+	speedup: 1.65,
+	bytesRatio: 2.3,
+	passReplace: "2/2",
+	passHashline: "2/2",
+	replaceEditMs: 8000,
+	hashlineEditMs: 4850,
+	replaceBytes: 2400,
+	hashlineBytes: 1040,
+	thinking: "medium",
+	reason: "1.65x faster",
+	measuredAt: new Date().toISOString(),
+};
+cfgMod.saveConfigSync(customCfg, process.env.PI_CODING_AGENT_DIR);
+assert.equal(shouldUseHashline("auto", { provider: "kimi-coding", id: "k3.1-pro-highspeed" }), true);
+
+customCfg.rules.unshift({ match: "kimi-coding/*", use: "replace", pinned: true });
+cfgMod.saveConfigSync(customCfg, process.env.PI_CODING_AGENT_DIR);
+assert.equal(shouldUseHashline("auto", { provider: "kimi-coding", id: "k3.1-pro-highspeed" }), false);
+customCfg.rules.shift();
+delete customCfg.calibrated["kimi-coding/k3.1-pro-highspeed"];
+cfgMod.saveConfigSync(customCfg, process.env.PI_CODING_AGENT_DIR);
+
 // 2. Mount extension on a mock Pi API
-const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-hl-test-"));
-process.env.PI_CODING_AGENT_DIR = path.join(tmp, "agent");
 
 const handlers = new Map();
 const tools = new Map();

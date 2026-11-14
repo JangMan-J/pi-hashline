@@ -22,8 +22,15 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { getAgentDir, withFileMutationQueue } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
+import {
+	loadConfigSync,
+	type OverrideMode,
+	resolveConfigPath,
+	resolveModelDecision,
+	saveConfigSync,
+} from "./config.ts";
 
-type HashlineMode = "auto" | "all" | "force" | "off";
+type HashlineMode = OverrideMode;
 
 interface OmpNatives {
 	EditStore: new () => {
@@ -115,43 +122,13 @@ function parseMode(raw: string | undefined): HashlineMode {
 	return "auto";
 }
 
-/** Models that oh-my-pi's own resolveEditMode() routes back to replace unless forced. */
-function isReplacePreferredFamily(fullModel: string): boolean {
-	const m = fullModel.toLowerCase();
-	return (
-		m.includes("kimi") ||
-		m.includes("moonshot") ||
-		m.includes("deepseek") ||
-		m.includes("minimax") ||
-		m.includes("mimo") ||
-		m.includes("stepfun") ||
-		m.includes("spark") ||
-		(m.includes("glm") && m.includes("5.3") && m.includes("flash")) ||
-		(m.includes("qwen") && m.includes("3.8"))
-	);
-}
-
 export function shouldUseHashline(
 	mode: HashlineMode,
 	model: { provider?: string; id?: string } | undefined,
+	agentDir?: string,
 ): boolean {
-	if (mode === "off") return false;
-	if (mode === "force") return true;
-	const full = `${model?.provider ?? ""}/${model?.id ?? ""}`.toLowerCase();
-	if (!full || full === "/") return mode === "all";
-	if (isReplacePreferredFamily(full)) return false;
-	if (mode === "all") return true;
-	// `auto`: activate on Gemini and OpenAI/GPT/Codex models (where oldText inflation is 7.5x-22x);
-	// leave Claude on stock oldText/newText (97.7% success, 1.30x inflation).
-	return (
-		full.includes("gemini") ||
-		full.startsWith("google/") ||
-		full.startsWith("google-vertex/") ||
-		full.includes("gpt-") ||
-		full.startsWith("openai/") ||
-		full.startsWith("openai-codex/") ||
-		/\/o[134](-|$)/.test(full)
-	);
+	const cfg = loadConfigSync(agentDir);
+	return resolveModelDecision(cfg, mode, model).use === "hashline";
 }
 
 function normalizeToLF(s: string): string {
@@ -492,9 +469,10 @@ export default function piHashlineExtension(pi: ExtensionAPI): void {
 	});
 
 	pi.registerCommand("hashline", {
-		description: "Inspect or switch hashline edit mode: /hashline [auto|all|force|off|stats]",
+		description: "Inspect, pin, or switch hashline routing: /hashline [auto|all|force|off|pin <hashline|replace> [pattern]|stats]",
 		handler: async (args, ctx) => {
-			const sub = (args ?? "").trim().toLowerCase();
+			const raw = (args ?? "").trim();
+			const sub = raw.toLowerCase();
 			if (sub === "stats") {
 				try {
 					const file = path.join(getAgentDir(), "hashline-stats.jsonl");
@@ -511,12 +489,28 @@ export default function piHashlineExtension(pi: ExtensionAPI): void {
 				}
 				return;
 			}
+			if (sub.startsWith("pin ")) {
+				const parts = raw.split(/\s+/);
+				const use = parts[1]?.toLowerCase();
+				const target = parts[2] || (ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "");
+				if ((use !== "hashline" && use !== "replace") || !target) {
+					ctx.ui.notify("Usage: /hashline pin <hashline|replace> [provider/model-glob]", "warning");
+					return;
+				}
+				const cfg = loadConfigSync(getAgentDir());
+				cfg.rules = cfg.rules.filter(r => !(r.pinned && r.match.toLowerCase() === target.toLowerCase()));
+				cfg.rules.unshift({ match: target, use, pinned: true, note: "pinned via /hashline" });
+				const file = saveConfigSync(cfg, getAgentDir());
+				ctx.ui.notify(`Pinned ${target} -> ${use} in ${file}`, "info");
+				return;
+			}
 			if (sub === "auto" || sub === "all" || sub === "force" || sub === "off") {
 				mode = sub;
 			}
-			const activeNow = shouldUseHashline(mode, ctx.model);
+			const cfg = loadConfigSync(getAgentDir());
+			const dec = resolveModelDecision(cfg, mode, ctx.model);
 			ctx.ui.notify(
-				`pi-hashline mode=${mode} (active for ${ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "current model"}: ${activeNow})`,
+				`pi-hashline mode=${mode} | ${ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "no-model"} -> ${dec.use} (${dec.source}) | config: ${resolveConfigPath(getAgentDir())}`,
 				"info",
 			);
 		},
