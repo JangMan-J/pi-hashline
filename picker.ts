@@ -43,7 +43,19 @@ const ARROW: Record<Column, string> = { model: "▲", provider: "▲", speed: "�
 export const GAUGE_ICON = "\uf0e4";
 export const EST_BENCH_CALLS = 12;
 export const EST_BENCH_TOK_K = 38;
-export const EST_BENCH_HINT = `bench: ~8–${EST_BENCH_CALLS} calls · ~${EST_BENCH_TOK_K}k tok`;
+/** Unmeasured fallback, shown only when no calibrated entry recorded apiCalls/totalTokens. */
+export const EST_BENCH_HINT = `bench: ~8–${EST_BENCH_CALLS} calls · ~${EST_BENCH_TOK_K}k tok (est.)`;
+
+/** Average recorded cost of one benchmark over calibrated entries that have both `apiCalls` and `totalTokens`. */
+export function benchHint(calibrated?: Record<string, CalibratedEntry>): string {
+	const runs = Object.values(calibrated ?? {}).filter(
+		(e) => (e?.apiCalls ?? 0) > 0 && (e?.totalTokens ?? 0) > 0,
+	);
+	if (!runs.length) return EST_BENCH_HINT;
+	const calls = Math.round(runs.reduce((s, e) => s + e.apiCalls!, 0) / runs.length);
+	const tokK = Math.round(runs.reduce((s, e) => s + e.totalTokens!, 0) / runs.length / 1000);
+	return `bench: ~${calls} calls · ~${tokK}k tok (avg of ${runs.length})`;
+}
 
 const SPEED_MIN_W = Math.max(visibleWidth("Speed ▼"), visibleWidth("99.99×"));
 /** Every possible Edit / Bench cell fits these fixed widths, so toggles and benchmarks never shift columns. */
@@ -808,7 +820,7 @@ export class HashlinePickerComponent {
 					: `${GAUGE_ICON} 0/~${estCalls} calls · ~${estTok}k tok est  `;
 			rightColor = "warning";
 		} else {
-			rightPlain = `${EST_BENCH_HINT}  `;
+			rightPlain = `${benchHint(this.opts.config.calibrated)}  `;
 			rightColor = "dim";
 		}
 		const rightW = visibleWidth(rightPlain);

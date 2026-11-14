@@ -5,7 +5,7 @@
  * `hashlineFormatNumberedLines`) in-process via N-API:
  * - Zero `oldText` echoed over the wire (`[PATH#TAG]` + `PUT N.=M:`, `PUT N*:`, `<N:`, `>N:`, `>$:`, `CUT`, `MV`, `REM`)
  * - 4-hex content snapshot tags + seen-line guard + AST parse-regression warning
- * - Model-aware activation (`PI_HASHLINE=auto|all|off` or `/hashline auto|all|off`):
+ * - Model-aware activation (`PI_HASHLINE=auto|all|force|off`, or cycled with Ctrl+O in the `/hashline` picker):
  *   - `auto` (default): swaps `edit` -> `hashline_edit` on Gemini (`google*`, `antigravity/gemini-*`) and OpenAI
  *     (`openai*`, excluding `spark`), keeping stock `edit(oldText, newText)` on Claude, Kimi, DeepSeek, MiniMax, Qwen.
  *   - `all` / `1` / `on`: enables `hashline_edit` on Claude too (still keeping Kimi/DeepSeek/MiniMax on `edit` unless `force`).

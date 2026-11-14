@@ -6,24 +6,22 @@ Instead of echoing `oldText` and matching whitespace, `read` prefixes text files
 
 ## Configuration (`~/.pi/agent/hashline.json`)
 
-Created automatically on first load (override path with `PI_HASHLINE_CONFIG`). Routing precedence in `auto` mode:
+Created automatically on first load (override path with `PI_HASHLINE_CONFIG`). `use` / `defaultUse` accept `"hashline"` or `"built-in"` (legacy `"replace"` is read as `"built-in"`). Routing precedence in `auto` mode:
 
-1. **Pinned rules** (`"pinned": true` in `rules` — hand-edited or set via `/hashline pin <hashline|replace> [glob]`)
-2. **Calibrated results** (`calibrated["provider/model"]` written by `calibrate.mjs`)
+1. **Pinned rules** (`"pinned": true` in `rules`, hand-edited or set with `Enter` in the picker)
+2. **Calibrated results** (`calibrated["provider/model"]`, written by `calibrate.mjs` or `Ctrl+B` in the picker)
 3. **Family/model glob rules** (`rules`, longest match wins, e.g. `*gemini*`, `openai-codex/*`, `anthropic/*`, `kimi*`)
-4. **`defaultUse`** (`"replace"` or `"hashline"`)
+4. **`defaultUse`** (`"built-in"` or `"hashline"`)
 
-Runtime overrides (`PI_HASHLINE` env var or `/hashline` command):
-- `/hashline` — show active decision and rule/calibration source for the current model
-- `/hashline pin <hashline|replace> [provider/model-glob]` — pin a model or family in `hashline.json`
-- `/hashline auto | all | force | off` — switch session override mode
-- `/hashline stats` — summarize recorded calls from `~/.pi/agent/hashline-stats.jsonl`
+The session mode starts from `PI_HASHLINE` (`auto` default, `all`, `force`, `off`) and is cycled in the picker.
 
-## Picker (`/hashline` menu, Alt+H)
+## Picker (`/hashline`, Alt+H)
 
-Columns: **Model** (`●` green = hashline, dim = built-in/off, gold = pinned/running), **Provider** (cross-provider tabs only), **Speed** (measured edit speedup ratio such as `2.00×` or `0.95×`; completely blank until benchmarked at least once), **Edit** (`● hashline` / `○ built-in`, `*` = pinned), **Bench** (`✓ hashline`, `✓ built-in`, `✗ failed`, `—`, or a live Nerd Font progress gauge ` ███░░░ 4/8` while benchmarking). The bottom bar right-aligns estimated (and live) benchmark API calls & token usage (`bench: ~8–12 calls · ~38k tok`).
+`/hashline` (no arguments) and Alt+H open the routing and benchmark picker (rebind with `"pi-hashline": { "shortcut": ... }` in `settings.json`; `false` disables it). Tabs: **Frequent** (current, favorite, previously used, benchmarked or pinned models), **Benchmarked**, **All**, then one tab per provider.
 
-Keys: `Enter` swap edit tool (pins the model) · `Ctrl+S` cycle sort (default → Speed → Edit → Bench → Model → Provider) · `Ctrl+B` run/stop benchmark · `Ctrl+U` unpin · `Ctrl+O` cycle mode (auto → all → force → off; `Ctrl+G` is left to Zellij) · `Tab` tabs · `Esc` close.
+Columns: **Model** (`●` green = hashline, dim = built-in/off, gold = pinned/running), **Provider** (cross-provider tabs only), **Speed** (measured edit speedup such as `2.00×`; blank until benchmarked), **Edit** (`● hashline` / `○ built-in`, `*` = pinned), **Bench** (`✓ hashline`, `✓ built-in`, `✗ failed`, `—`, or a live Nerd Font gauge ` ███░░░ 4/8`). The bottom right shows the average measured cost of past benchmarks (`bench: ~10 calls · ~35k tok (avg of 3)`), a labelled estimate when none is recorded, and live calls/tokens while a benchmark runs.
+
+Keys: `Enter` switch edit tool (pins the model) · `Ctrl+B` run/stop benchmark · `Ctrl+U` unpin · `Ctrl+O` cycle mode (auto → all → force → off; `Ctrl+G` is left to Zellij) · `Ctrl+S` cycle sort (default → Speed → Edit → Bench → Model → Provider) · `Tab`/`Shift+Tab` or `←`/`→` tabs · type to search · `Esc` close.
 
 ## Deterministic Calibrator (`calibrate.mjs`)
 

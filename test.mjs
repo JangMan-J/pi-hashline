@@ -245,7 +245,7 @@ assert.ok(fs.readFileSync(path.join(tmp, "src/moved_dest.py"), "utf8").includes(
 // 8. TUI Picker deterministic tests (Speed column blank until benched, built-in naming, Nerd Font gauge, right-aligned token/call hint, accent headers, 0-jitter)
 const pickerMod = await jiti.import(path.join(import.meta.dirname, "picker.ts"));
 const tuiMod = await jiti.import(path.join(piPkgRoot, "../pi-tui/dist/index.js"));
-const { HashlinePickerComponent, GAUGE_ICON, EST_BENCH_HINT } = pickerMod;
+const { HashlinePickerComponent, GAUGE_ICON, EST_BENCH_HINT, benchHint } = pickerMod;
 const { visibleWidth } = tuiMod;
 
 // Verify config.ts also accepts "built-in" in hand-edited JSON rules
@@ -271,6 +271,13 @@ const calEntry = (use, passHashline = "2/2", speedup = 2.0, apiCalls = 10, total
 	apiCalls, totalTokens,
 	thinking: "high", reason: "test", measuredAt: new Date().toISOString(),
 });
+
+// Bench hint: average of recorded apiCalls/totalTokens when present; a labelled estimate only when nothing was measured.
+const unmeasured = { ...calEntry("replace"), apiCalls: undefined, totalTokens: undefined };
+assert.equal(benchHint({ a: calEntry("hashline", "2/2", 2, 9, 40000), b: calEntry("replace", "2/2", 1, 11, 64000), c: unmeasured }), "bench: ~10 calls · ~52k tok (avg of 2)");
+for (const cal of [undefined, {}, { c: unmeasured }]) assert.equal(benchHint(cal), EST_BENCH_HINT);
+assert.ok(EST_BENCH_HINT.endsWith("(est.)"), EST_BENCH_HINT);
+const MEASURED_HINT = "bench: ~10 calls · ~35k tok (avg of 3)";
 
 let closed = false;
 const runningJobs = new Map();
@@ -399,7 +406,7 @@ assert.ok(selectedRow(f120).startsWith("▶ Claude Opus 5.5 ●"), f120.join("\n
 assert.ok(f120[17].includes("anthropic/claude-opus-5-5 · benchmarked → built-in (11 calls · 36.8k tok)"), f120[17]);
 // Bottom bar has key hints on the left and right-justified estimated API calls / token usage on the right!
 assert.ok(f120.at(-2).startsWith("  Enter swap · Ctrl+S sort · Ctrl+B bench"), f120.at(-2));
-assert.ok(f120.at(-2).endsWith(`${EST_BENCH_HINT}  `), `bottom bar not right-justified: "${f120.at(-2)}"`);
+assert.ok(f120.at(-2).endsWith(`${MEASURED_HINT}  `), `bottom bar not right-justified: "${f120.at(-2)}"`);
 
 // Every column header is accent-colored (differentiated from data rows), even when unsorted!
 const styledHdrInitial = render(120, markTheme)[HEADER_ROW];
@@ -560,7 +567,7 @@ const everything = allFrames.flat().join("\n");
 for (const bad of ["replace", "Uses", "untested", "⟳ running"]) {
 	assert.ok(!everything.includes(bad), `rendered counter-intuitive text "${bad}"`);
 }
-for (const good of ["○ built-in", "✓ built-in", "✓ hashline", "2.00×", "0.95×", `${GAUGE_ICON} ███░░░ 4/8`, EST_BENCH_HINT]) {
+for (const good of ["○ built-in", "✓ built-in", "✓ hashline", "2.00×", "0.95×", `${GAUGE_ICON} ███░░░ 4/8`, MEASURED_HINT]) {
 	assert.ok(everything.includes(good), `missing expected UI text "${good}"`);
 }
 assert.equal(new Set(allFrames.filter((f) => f.length > 2).map((f) => f.length)).size, 1, "picker height constant");
