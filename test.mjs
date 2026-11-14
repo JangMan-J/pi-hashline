@@ -75,6 +75,7 @@ ext({
 		tools.set(t.name, t);
 	},
 	registerCommand() {},
+	registerShortcut() {},
 });
 
 const hlTool = tools.get("hashline_edit");
@@ -240,6 +241,131 @@ const moveEdit = await hlTool.execute(
 assert.equal(moveEdit.isError, undefined, moveEdit.content[0].text);
 assert.equal(fs.existsSync(destPath), false);
 assert.ok(fs.readFileSync(path.join(tmp, "src/moved_dest.py"), "utf8").includes("def compute(x):"));
+
+// 8. TUI Picker deterministic tests (frame widths, Frequent ordering, Search vs Ctrl+B / Enter / Ctrl+U / Tab / Esc)
+const pickerMod = await jiti.import(path.resolve("picker.ts"));
+const tuiMod = await jiti.import(path.join(piPkgRoot, "../pi-tui/dist/index.js"));
+const { HashlinePickerComponent } = pickerMod;
+const { visibleWidth } = tuiMod;
+
+const plainTheme = {
+	fg: (_c, s) => s,
+	bg: (_c, s) => s,
+	bold: (s) => s,
+};
+
+let fakeClock = 1_000_000;
+let closed = false;
+const runningJobs = new Map();
+const benchErrors = new Map();
+let pickerCfg = cfgMod.loadConfigSync(process.env.PI_CODING_AGENT_DIR);
+pickerCfg.calibrated["antigravity/gemini-4-argon"] = {
+	use: "hashline",
+	speedup: 2.0,
+	bytesRatio: 5.08,
+	passReplace: "2/2",
+	passHashline: "2/2",
+	replaceEditMs: 16324,
+	hashlineEditMs: 8161,
+	replaceBytes: 4468,
+	hashlineBytes: 879,
+	thinking: "high",
+	reason: "2.0x faster",
+	measuredAt: new Date().toISOString(),
+};
+let curOverride = "auto";
+
+const catalog = [
+	{ provider: "openai-codex", id: "gpt-6-astra", name: "GPT-6 Astra", contextWindow: 272000, reasoning: true, input: ["text", "image"], cost: { input: 10, output: 50 } },
+	{ provider: "anthropic", id: "claude-opus-5-5", name: "Claude Opus 5.5", contextWindow: 1000000, reasoning: true, input: ["text", "image"], cost: { input: 4, output: 20 } },
+	{ provider: "antigravity", id: "gemini-4-argon", name: "Gemini 4 Argon", contextWindow: 1000000, reasoning: true, input: ["text", "image"], cost: { input: 2, output: 10 } },
+	{ provider: "kimi-coding", id: "k3.1-pro-highspeed", name: "Kimi K3.1 Pro Highspeed", contextWindow: 1000000, reasoning: true, input: ["text", "image"], cost: { input: 4, output: 20 } },
+];
+
+const usage = {
+	counts: new Map([
+		["openai-codex/gpt-6-astra", 432],
+		["anthropic/claude-opus-5-5", 388],
+		["antigravity/gemini-4-argon", 223],
+	]),
+	favorites: new Set(["antigravity/gemini-4-argon"]),
+};
+
+const picker = new HashlinePickerComponent({
+	allModels: catalog,
+	currentModel: catalog[1], // Claude Opus 5.5 current -> sorts first on Frequent!
+	usage,
+	config: pickerCfg,
+	overrideMode: curOverride,
+	runningJobs,
+	lastBenchErrors: benchErrors,
+	now: () => fakeClock,
+	onToggleModel(m, nextUse) {
+		const key = `${m.provider}/${m.id}`.toLowerCase();
+		pickerCfg.rules = pickerCfg.rules.filter((r) => !(r.pinned && r.match.toLowerCase() === key));
+		pickerCfg.rules.unshift({ match: key, use: nextUse, pinned: true });
+		return pickerCfg;
+	},
+	onUnpinModel(m) {
+		const key = `${m.provider}/${m.id}`.toLowerCase();
+		pickerCfg.rules = pickerCfg.rules.filter((r) => !(r.pinned && r.match.toLowerCase() === key));
+		return pickerCfg;
+	},
+	onCycleOverrideMode() {
+		const order = ["auto", "all", "force", "off"];
+		curOverride = order[(order.indexOf(curOverride) + 1) % order.length];
+		return curOverride;
+	},
+	onToggleBenchmark(m) {
+		const key = `${m.provider}/${m.id}`.toLowerCase();
+		if (runningJobs.has(key)) runningJobs.delete(key);
+		else runningJobs.set(key, { startedAt: fakeClock - 5000, gen: 1 });
+	},
+	onClose() {
+		closed = true;
+	},
+});
+
+// Verify width bounds across wide, narrow, and tiny viewports
+for (const w of [120, 76, 48, 22]) {
+	const frame = picker.render(w, plainTheme);
+	for (const ln of frame) {
+		assert.ok(visibleWidth(ln) <= w, `line exceeded width ${w}: ${visibleWidth(ln)} "${ln}"`);
+	}
+}
+
+// Current model (Claude Opus 5.5) is selected first on Frequent and uses `○ replace`
+let frame110 = picker.render(110, plainTheme).join("\n");
+assert.ok(frame110.includes("▶ Claude Opus 5.5"), frame110);
+assert.ok(frame110.includes("○ replace"), frame110);
+assert.ok(frame110.includes("✓ 2.00x 5.1x↓"), frame110);
+
+// Enter swaps Claude Opus 5.5 -> `● hashline *` and shows big dot ` ●`!
+picker.handleInput("\r");
+frame110 = picker.render(110, plainTheme).join("\n");
+assert.ok(frame110.includes("▶ Claude Opus 5.5 ●"), frame110);
+assert.ok(frame110.includes("● hashline *"), frame110);
+
+// Ctrl+U unpins Claude Opus 5.5 back to `○ replace`
+picker.handleInput("\x15"); // Ctrl+U
+frame110 = picker.render(110, plainTheme).join("\n");
+assert.ok(!frame110.includes("● hashline *"), frame110);
+
+// Ctrl+B starts live benchmark (`⟳ benching 5s…`) without closing menu
+picker.handleInput("\x02"); // Ctrl+B
+frame110 = picker.render(110, plainTheme).join("\n");
+assert.ok(frame110.includes("⟳ benching 5s…"), frame110);
+
+// Printable keys ("b", "s") go into Search input instead of triggering hotkeys!
+picker.handleInput("a");
+picker.handleInput("r");
+picker.handleInput("g");
+frame110 = picker.render(110, plainTheme).join("\n");
+assert.ok(frame110.includes("▶ Gemini 4 Argon ●"), frame110);
+
+// Esc closes cleanly
+picker.handleInput("\x1b");
+assert.equal(closed, true);
 
 fs.rmSync(tmp, { recursive: true, force: true });
 console.log("ALL_PI_HASHLINE_TESTS_PASSED");

@@ -20,17 +20,26 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { getAgentDir, withFileMutationQueue } from "@earendil-works/pi-coding-agent";
+import type { KeyId } from "@earendil-works/pi-tui";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import {
-	loadConfigSync,
-	type OverrideMode,
-	resolveConfigPath,
-	resolveModelDecision,
-	saveConfigSync,
-} from "./config.ts";
+import { loadConfigSync, type OverrideMode, resolveModelDecision } from "./config.ts";
+import { type BenchJobState, openHashlineMenu } from "./picker.ts";
 
 type HashlineMode = OverrideMode;
+
+const DEFAULT_SHORTCUT = "alt+h";
+
+function resolveShortcuts(): string[] {
+	try {
+		const raw = JSON.parse(fs.readFileSync(path.join(getAgentDir(), "settings.json"), "utf8"));
+		const cfg = raw?.["pi-hashline"]?.shortcut;
+		if (cfg === false) return [];
+		if (typeof cfg === "string") return cfg ? [cfg] : [];
+		if (Array.isArray(cfg)) return cfg.filter((s): s is string => typeof s === "string" && s.length > 0);
+	} catch {}
+	return [DEFAULT_SHORTCUT];
+}
 
 interface OmpNatives {
 	EditStore: new () => {
@@ -468,51 +477,38 @@ export default function piHashlineExtension(pi: ExtensionAPI): void {
 		},
 	});
 
+	const runningJobs = new Map<string, BenchJobState>();
+	const lastBenchErrors = new Map<string, string>();
+	const openMenu = async (ctx: ExtensionContext) => {
+		await openHashlineMenu({
+			ctx,
+			getOverrideMode: () => mode,
+			setOverrideMode: (next) => {
+				mode = next;
+			},
+			runningJobs,
+			lastBenchErrors,
+		});
+		activeThisRun = shouldUseHashline(mode, ctx.model);
+	};
+
 	pi.registerCommand("hashline", {
-		description: "Inspect, pin, or switch hashline routing: /hashline [auto|all|force|off|pin <hashline|replace> [pattern]|stats]",
-		handler: async (args, ctx) => {
-			const raw = (args ?? "").trim();
-			const sub = raw.toLowerCase();
-			if (sub === "stats") {
-				try {
-					const file = path.join(getAgentDir(), "hashline-stats.jsonl");
-					const rows = fs
-						.readFileSync(file, "utf8")
-						.trim()
-						.split("\n")
-						.filter(Boolean)
-						.map(l => JSON.parse(l));
-					const ok = rows.filter(r => r.ok).length;
-					ctx.ui.notify(`pi-hashline: ${rows.length} calls (${ok} ok, ${rows.length - ok} rejected)`, "info");
-				} catch {
-					ctx.ui.notify("pi-hashline: no stats recorded yet", "info");
-				}
-				return;
-			}
-			if (sub.startsWith("pin ")) {
-				const parts = raw.split(/\s+/);
-				const use = parts[1]?.toLowerCase();
-				const target = parts[2] || (ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "");
-				if ((use !== "hashline" && use !== "replace") || !target) {
-					ctx.ui.notify("Usage: /hashline pin <hashline|replace> [provider/model-glob]", "warning");
-					return;
-				}
-				const cfg = loadConfigSync(getAgentDir());
-				cfg.rules = cfg.rules.filter(r => !(r.pinned && r.match.toLowerCase() === target.toLowerCase()));
-				cfg.rules.unshift({ match: target, use, pinned: true, note: "pinned via /hashline" });
-				const file = saveConfigSync(cfg, getAgentDir());
-				ctx.ui.notify(`Pinned ${target} -> ${use} in ${file}`, "info");
-				return;
-			}
-			if (sub === "auto" || sub === "all" || sub === "force" || sub === "off") {
-				mode = sub;
-			}
-			const cfg = loadConfigSync(getAgentDir());
-			const dec = resolveModelDecision(cfg, mode, ctx.model);
-			ctx.ui.notify(
-				`pi-hashline mode=${mode} | ${ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "no-model"} -> ${dec.use} (${dec.source}) | config: ${resolveConfigPath(getAgentDir())}`,
-				"info",
-			);
+		description: "Open the Hashline edit routing & benchmark picker (Enter swap, Ctrl+B benchmark, Tab facets)",
+		handler: async (_args, ctx) => {
+			await openMenu(ctx);
 		},
 	});
+
+	const seenShortcuts = new Set<string>();
+	for (const shortcut of resolveShortcuts()) {
+		const norm = shortcut.toLowerCase();
+		if (seenShortcuts.has(norm)) continue;
+		seenShortcuts.add(norm);
+		pi.registerShortcut(shortcut as KeyId, {
+			description: "Open Hashline edit routing & benchmark picker",
+			handler: async (ctx) => {
+				await openMenu(ctx);
+			},
+		});
+	}
 }

@@ -39,6 +39,7 @@ function parseCli(argv) {
 	let thinking = "high";
 	let minSpeedup = undefined;
 	let dryRun = false;
+	let unpin = false;
 	let concurrency = 3;
 	const models = [];
 	for (let i = 0; i < argv.length; i++) {
@@ -47,9 +48,10 @@ function parseCli(argv) {
 		else if (a === "--min-speedup" && argv[i + 1]) minSpeedup = Number(argv[++i]);
 		else if (a === "--concurrency" && argv[i + 1]) concurrency = Math.max(1, Number(argv[++i]));
 		else if (a === "--dry-run") dryRun = true;
+		else if (a === "--unpin") unpin = true;
 		else if (!a.startsWith("-")) models.push(a);
 	}
-	return { thinking, minSpeedup, dryRun, concurrency, models: models.length > 0 ? models : DEFAULT_ROSTER };
+	return { thinking, minSpeedup, dryRun, unpin, concurrency, models: models.length > 0 ? models : DEFAULT_ROSTER };
 }
 
 // ---------------------------------------------------------------------------
@@ -489,9 +491,26 @@ async function worker() {
 await Promise.all(Array.from({ length: Math.min(cli.concurrency, cli.models.length) }, () => worker()));
 
 if (!cli.dryRun) {
+	// Re-read config right before atomic write so concurrent UI pins on other models are preserved!
+	let latestCfg = cfg;
+	try {
+		latestCfg = JSON.parse(fs.readFileSync(CONFIG_PATH, "utf8"));
+	} catch {}
+	latestCfg.minSpeedup = threshold;
+	latestCfg.calibrated ??= {};
+	for (const res of outcomes) {
+		if (!res.skipped && res.entry) {
+			latestCfg.calibrated[res.model] = res.entry;
+			if (cli.unpin && Array.isArray(latestCfg.rules)) {
+				latestCfg.rules = latestCfg.rules.filter(
+					(r) => !(r.pinned && String(r.match ?? "").toLowerCase() === res.model),
+				);
+			}
+		}
+	}
 	fs.mkdirSync(path.dirname(CONFIG_PATH), { recursive: true });
 	const tmp = `${CONFIG_PATH}.tmp-${process.pid}`;
-	fs.writeFileSync(tmp, JSON.stringify(cfg, null, 2) + "\n", "utf8");
+	fs.writeFileSync(tmp, JSON.stringify(latestCfg, null, 2) + "\n", "utf8");
 	fs.renameSync(tmp, CONFIG_PATH);
 	console.log(`\nWrote calibrated routing table to ${CONFIG_PATH}`);
 }
