@@ -21,8 +21,8 @@ const jiti = createJiti(import.meta.url, {
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-hl-test-"));
 process.env.PI_CODING_AGENT_DIR = path.join(tmp, "agent");
 
-const mod = await jiti.import(path.resolve("index.ts"));
-const cfgMod = await jiti.import(path.resolve("config.ts"));
+const mod = await jiti.import(path.join(import.meta.dirname, "index.ts"));
+const cfgMod = await jiti.import(path.join(import.meta.dirname, "config.ts"));
 const ext = mod.default;
 const { shouldUseHashline } = mod;
 
@@ -243,7 +243,7 @@ assert.equal(fs.existsSync(destPath), false);
 assert.ok(fs.readFileSync(path.join(tmp, "src/moved_dest.py"), "utf8").includes("def compute(x):"));
 
 // 8. TUI Picker deterministic tests (header row geometry, sort cycle, hotkeys, honest bench verdicts)
-const pickerMod = await jiti.import(path.resolve("picker.ts"));
+const pickerMod = await jiti.import(path.join(import.meta.dirname, "picker.ts"));
 const tuiMod = await jiti.import(path.join(piPkgRoot, "../pi-tui/dist/index.js"));
 const { HashlinePickerComponent } = pickerMod;
 const { visibleWidth } = tuiMod;
