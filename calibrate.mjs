@@ -36,7 +36,7 @@ const DEFAULT_ROSTER = [
 ];
 
 function parseCli(argv) {
-	let thinking = "medium";
+	let thinking = "high";
 	let minSpeedup = undefined;
 	let dryRun = false;
 	let concurrency = 3;
