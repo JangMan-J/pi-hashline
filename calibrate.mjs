@@ -40,6 +40,7 @@ function parseCli(argv) {
 	let minSpeedup = undefined;
 	let dryRun = false;
 	let unpin = false;
+	let progress = false;
 	let concurrency = 3;
 	const models = [];
 	for (let i = 0; i < argv.length; i++) {
@@ -49,9 +50,10 @@ function parseCli(argv) {
 		else if (a === "--concurrency" && argv[i + 1]) concurrency = Math.max(1, Number(argv[++i]));
 		else if (a === "--dry-run") dryRun = true;
 		else if (a === "--unpin") unpin = true;
+		else if (a === "--progress") progress = true;
 		else if (!a.startsWith("-")) models.push(a);
 	}
-	return { thinking, minSpeedup, dryRun, unpin, concurrency, models: models.length > 0 ? models : DEFAULT_ROSTER };
+	return { thinking, minSpeedup, dryRun, unpin, progress, concurrency, models: models.length > 0 ? models : DEFAULT_ROSTER };
 }
 
 // ---------------------------------------------------------------------------
@@ -254,7 +256,7 @@ console.log("PASS");
 
 const TASKS = [TASK1, TASK2];
 
-function runSingleTrial(model, thinking, task, arm) {
+function runSingleTrial(model, thinking, task, arm, hooks) {
 	return new Promise((resolve) => {
 		const root = fs.mkdtempSync(path.join("/var/tmp", `hl-cal-${arm}-`));
 		const agentDir = path.join(root, "agent");
@@ -303,25 +305,62 @@ function runSingleTrial(model, thinking, task, arm) {
 		const timer = setTimeout(() => child.kill("SIGKILL"), 180_000);
 		let out = "";
 		let err = "";
-		child.stdout.on("data", (d) => (out += d));
+		let streamBuf = "";
+		let readStepCounted = false;
+		let trialCalls = 0;
+		let trialTokens = 0;
+		const onStreamLine = (line) => {
+			if (!line.startsWith("{")) return;
+			try {
+				const ev = JSON.parse(line);
+				if (ev.type === "message_end" && ev.message?.role === "assistant") {
+					const u = ev.message.usage;
+					const tok =
+						Number(u?.totalTokens) ||
+						(Number(u?.input) || 0) +
+							(Number(u?.output) || 0) +
+							(Number(u?.cacheRead) || 0) +
+							(Number(u?.cacheWrite) || 0);
+					trialCalls += 1;
+					trialTokens += tok;
+					hooks?.onUsage?.(1, tok);
+				} else if (
+					!readStepCounted &&
+					ev.type === "message_end" &&
+					ev.message?.role === "toolResult" &&
+					ev.message.toolName === "read"
+				) {
+					readStepCounted = true;
+					hooks?.onStep?.(1);
+				}
+			} catch {}
+		};
+		child.stdout.on("data", (d) => {
+			const chunk = String(d);
+			out += chunk;
+			streamBuf += chunk;
+			let nl = streamBuf.indexOf("\n");
+			while (nl !== -1) {
+				onStreamLine(streamBuf.slice(0, nl).trim());
+				streamBuf = streamBuf.slice(nl + 1);
+				nl = streamBuf.indexOf("\n");
+			}
+		});
 		child.stderr.on("data", (d) => (err += d));
 		child.on("close", () => {
+			if (streamBuf.trim()) onStreamLine(streamBuf.trim());
 			clearTimeout(timer);
 			const wallMs = Math.round(performance.now() - t0);
-			let msgStartTs = 0;
 			let editMs = 0;
 			let editBytes = 0;
 			let editErrors = 0;
 			let editCalls = 0;
 			let apiError = "";
-
 			for (const line of out.split("\n")) {
 				if (!line.startsWith("{")) continue;
 				try {
 					const ev = JSON.parse(line);
-					if (ev.type === "message_start") {
-						msgStartTs = Date.now(); // fallback if event lacks ts
-					}
+					// parsed below via message timestamps
 					if (ev.type === "message_end" && ev.message?.role === "assistant") {
 						const m = ev.message;
 						if (m.errorMessage) apiError = m.errorMessage;
@@ -373,6 +412,7 @@ function runSingleTrial(model, thinking, task, arm) {
 			ver.stderr.on("data", (d) => (verOut += d));
 			ver.on("close", (vCode) => {
 				fs.rmSync(root, { recursive: true, force: true });
+				hooks?.onStep?.(readStepCounted ? 1 : 2);
 				resolve({
 					task: task.id,
 					arm,
@@ -382,6 +422,8 @@ function runSingleTrial(model, thinking, task, arm) {
 					editBytes,
 					editCalls,
 					editErrors,
+					apiCalls: trialCalls,
+					totalTokens: trialTokens,
 					apiError: apiError || err.trim().slice(-200),
 				});
 			});
@@ -389,13 +431,37 @@ function runSingleTrial(model, thinking, task, arm) {
 	});
 }
 
-async function calibrateModel(model, thinking, minSpeedup) {
+async function calibrateModel(model, thinking, minSpeedup, onProgress) {
+	const totalSteps = TASKS.length * 2 * 2;
+	let doneSteps = 0;
+	let apiCalls = 0;
+	let totalTokens = 0;
+	const emit = () =>
+		onProgress?.({
+			model: model.toLowerCase(),
+			done: Math.min(totalSteps, doneSteps),
+			total: totalSteps,
+			calls: apiCalls,
+			tokens: totalTokens,
+		});
+	emit();
+	const hooks = {
+		onUsage(callsDelta, tokDelta) {
+			apiCalls += callsDelta;
+			totalTokens += tokDelta;
+			emit();
+		},
+		onStep(stepDelta) {
+			doneSteps += stepDelta;
+			emit();
+		},
+	};
 	// Run Task 1 and Task 2 paired (both arms start at the exact same moment per task)
 	const results = [];
 	for (const task of TASKS) {
 		const [rep, hl] = await Promise.all([
-			runSingleTrial(model, thinking, task, "replace"),
-			runSingleTrial(model, thinking, task, "hashline"),
+			runSingleTrial(model, thinking, task, "replace", hooks),
+			runSingleTrial(model, thinking, task, "hashline", hooks),
 		]);
 		results.push({ task: task.id, replace: rep, hashline: hl });
 	}
@@ -408,7 +474,6 @@ async function calibrateModel(model, thinking, minSpeedup) {
 	const hlBytes = results.reduce((s, r) => s + r.hashline.editBytes, 0);
 	const speedup = +(repEditMs / Math.max(1, hlEditMs)).toFixed(2);
 	const bytesRatio = +(repBytes / Math.max(1, hlBytes)).toFixed(2);
-
 	let use = "replace";
 	let reason = "";
 	if (hlPasses === 0 && repPasses === 0) {
@@ -420,7 +485,7 @@ async function calibrateModel(model, thinking, minSpeedup) {
 		reason = `higher accuracy (${hlPasses}/${TASKS.length} vs ${repPasses}/${TASKS.length})`;
 	} else if (hlPasses < repPasses) {
 		use = "replace";
-		reason = `replace passed ${repPasses}/${TASKS.length} vs hashline ${hlPasses}/${TASKS.length}`;
+		reason = `built-in passed ${repPasses}/${TASKS.length} vs hashline ${hlPasses}/${TASKS.length}`;
 	} else if (speedup >= minSpeedup) {
 		use = "hashline";
 		reason = `${speedup}x edit speedup >= ${minSpeedup}x (${hlPasses}/${TASKS.length} pass, ${bytesRatio}x smaller payload)`;
@@ -445,6 +510,8 @@ async function calibrateModel(model, thinking, minSpeedup) {
 			hashlineEditMs: hlEditMs,
 			replaceBytes: repBytes,
 			hashlineBytes: hlBytes,
+			apiCalls,
+			totalTokens,
 			thinking,
 			reason,
 			measuredAt: new Date().toISOString(),
@@ -474,14 +541,20 @@ async function worker() {
 	while (queue.length > 0) {
 		const m = queue.shift();
 		if (!m) break;
-		const res = await calibrateModel(m, cli.thinking, threshold);
+		const res = await calibrateModel(
+			m,
+			cli.thinking,
+			threshold,
+			cli.progress ? (p) => process.stdout.write(`[PROGRESS] ${JSON.stringify(p)}\n`) : undefined,
+		);
 		outcomes.push(res);
 		if (res.skipped) {
 			console.log(`  [SKIP] ${m}: ${res.error}`);
 		} else {
 			const e = res.entry;
+			const label = e.use === "hashline" ? "HASHLINE" : "BUILT-IN";
 			console.log(
-				`  [${e.use.toUpperCase().padEnd(8)}] ${res.model.padEnd(34)} speedup=${String(e.speedup + "x").padEnd(6)} editMs=${e.replaceEditMs}->${e.hashlineEditMs}  bytes=${e.replaceBytes}->${e.hashlineBytes} (${e.bytesRatio}x)  pass=${e.passReplace}->${e.passHashline}`,
+				`  [${label.padEnd(8)}] ${res.model.padEnd(34)} speedup=${String(e.speedup + "x").padEnd(6)} editMs=${e.replaceEditMs}->${e.hashlineEditMs}  calls=${e.apiCalls} tok=${e.totalTokens}  pass=${e.passReplace}->${e.passHashline}`,
 			);
 			cfg.calibrated[res.model] = e;
 		}

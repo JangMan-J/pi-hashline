@@ -21,13 +21,13 @@ Runtime overrides (`PI_HASHLINE` env var or `/hashline` command):
 
 ## Picker (`/hashline` menu, Alt+H)
 
-Columns: **Model** (`●` green = hashline, dim = replace/off, gold = pinned/running), **Provider** (cross-provider tabs only), **Uses** (session count, `★` = pi-picks favorite), **Edit** (`● hashline` / `○ replace`, `*` = pinned), **Bench** (`✓ faster`, `✓ keep replace`, `✗ error`, `untested`). A fixed header row shows the active sort; column positions never shift while scrolling, toggling, or sorting, and narrow terminals drop Uses, then Bench, then Edit.
+Columns: **Model** (`●` green = hashline, dim = built-in/off, gold = pinned/running), **Provider** (cross-provider tabs only), **Speed** (measured edit speedup ratio such as `2.00×` or `0.95×`; completely blank until benchmarked at least once), **Edit** (`● hashline` / `○ built-in`, `*` = pinned), **Bench** (`✓ hashline`, `✓ built-in`, `✗ failed`, `—`, or a live Nerd Font progress gauge ` ███░░░ 4/8` while benchmarking). The bottom bar right-aligns estimated (and live) benchmark API calls & token usage (`bench: ~8–12 calls · ~38k tok`).
 
-Keys: `Enter` swap edit tool (pins the model) · `Ctrl+S` cycle sort (default → Uses → Edit → Bench → Model → Provider) · `Ctrl+B` run/stop benchmark · `Ctrl+U` unpin · `Ctrl+O` cycle mode (auto → all → force → off; `Ctrl+G` is left to Zellij) · `Tab` tabs · `Esc` close.
+Keys: `Enter` swap edit tool (pins the model) · `Ctrl+S` cycle sort (default → Speed → Edit → Bench → Model → Provider) · `Ctrl+B` run/stop benchmark · `Ctrl+U` unpin · `Ctrl+O` cycle mode (auto → all → force → off; `Ctrl+G` is left to Zellij) · `Tab` tabs · `Esc` close.
 
 ## Deterministic Calibrator (`calibrate.mjs`)
 
-Runs two bash-free, 2-turn (`read` -> `edit`) multi-hunk refactoring micro-tasks head-to-head (`replace` vs `hashline`, starting both arms simultaneously per task and verifying output with strict Node assertions in `<20 ms`), then writes each model's verdict (plus raw timing/byte fields, which the picker summarizes only as faster / keep replace) into `~/.pi/agent/hashline.json`:
+Runs two bash-free, 2-turn (`read` -> `edit`) multi-hunk refactoring micro-tasks head-to-head (`built-in` vs `hashline`, starting both arms simultaneously per task and verifying output with strict Node assertions in `<20 ms`), then writes each model's measured speed ratio, API calls, token usage, and routing verdict into `~/.pi/agent/hashline.json`:
 
 ```sh
 # Calibrate default roster across major provider families (~45-90s total)

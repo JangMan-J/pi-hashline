@@ -24,6 +24,8 @@ export interface CalibratedEntry {
 	hashlineEditMs: number;
 	replaceBytes: number;
 	hashlineBytes: number;
+	apiCalls?: number;
+	totalTokens?: number;
 	thinking: string;
 	reason: string;
 	measuredAt: string;
@@ -84,16 +86,23 @@ function specificity(glob: string): number {
 	return glob.replace(/[*?]/g, "").length;
 }
 
+function normalizeChoice(v: unknown): EditChoice | undefined {
+	if (v === "hashline") return "hashline";
+	if (v === "replace" || v === "built-in") return "replace";
+	return undefined;
+}
+
 export function matchBestRule(rules: readonly ModelRule[], fullModel: string, bareId: string): ModelRule | undefined {
 	let best: { rule: ModelRule; score: number } | undefined;
 	for (const rule of rules) {
-		if (!rule?.match || (rule.use !== "hashline" && rule.use !== "replace")) continue;
+		const use = normalizeChoice(rule?.use);
+		if (!rule?.match || !use) continue;
 		const re = globToRegExp(rule.match);
 		const target = rule.match.includes("/") ? fullModel : bareId;
 		if (re.test(fullModel) || re.test(target)) {
 			const score = specificity(rule.match) + (rule.match.includes("/") ? 100 : 0);
 			if (!best || score > best.score) {
-				best = { rule, score };
+				best = { rule: { ...rule, use }, score };
 			}
 		}
 	}
@@ -136,8 +145,9 @@ export function resolveModelDecision(
 
 	// 3. Empirical calibration result for this exact `provider/id` beats unpinned family wildcards.
 	const calibrated = config.calibrated?.[full];
-	if (calibrated && (calibrated.use === "hashline" || calibrated.use === "replace")) {
-		return { use: calibrated.use, source: `calibrated:${full} (${calibrated.speedup}x)` };
+	const calUse = normalizeChoice(calibrated?.use);
+	if (calibrated && calUse) {
+		return { use: calUse, source: `calibrated:${full} (${calibrated.speedup}x)` };
 	}
 
 	// 4. Unpinned family/model rules (longest match wins).
@@ -159,7 +169,7 @@ export function loadConfigSync(agentDir?: string, seedIfMissing = true): Hashlin
 		const parsed = JSON.parse(fs.readFileSync(file, "utf8")) as Partial<HashlineConfig>;
 		const config: HashlineConfig = {
 			version: 1,
-			defaultUse: parsed.defaultUse === "hashline" ? "hashline" : "replace",
+			defaultUse: normalizeChoice(parsed.defaultUse) ?? "replace",
 			minSpeedup: typeof parsed.minSpeedup === "number" && parsed.minSpeedup > 0 ? parsed.minSpeedup : 1.15,
 			rules: Array.isArray(parsed.rules) ? parsed.rules : DEFAULT_CONFIG.rules,
 			calibrated: parsed.calibrated && typeof parsed.calibrated === "object" ? parsed.calibrated : {},

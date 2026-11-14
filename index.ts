@@ -301,7 +301,6 @@ export default function piHashlineExtension(pi: ExtensionAPI): void {
 		const finalText = numbered ? `${header}\n${numbered}${footer}` : `${header}${footer}`;
 		return {
 			content: [{ type: "text", text: finalText }, ...(event.content?.slice(1) ?? [])],
-			structuredContent: finalText,
 		};
 	});
 
