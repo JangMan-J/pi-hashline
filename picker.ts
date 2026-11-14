@@ -1,7 +1,8 @@
 /**
  * Interactive TUI menu for `pi-hashline`, modeled directly on `@jangmanj/pi-picks`
  * (big `●` glyph, semantic colors, facet tabs with `<<`/`>>` windowing, live fuzzy search,
- * stable selection identity, and responsive column dropping).
+ * stable selection identity, a fixed column header row with Ctrl+S sort cycling, and
+ * responsive column dropping that never shifts column x-offsets).
  */
 
 import { type ChildProcess, spawn } from "node:child_process";
@@ -27,6 +28,39 @@ const BENCHMARKED_TAB = "\0benchmarked";
 const ALL_TAB = "\0all";
 
 const CALIBRATE_SCRIPT = path.resolve(import.meta.dirname, "calibrate.mjs");
+
+export type SortMode = "default" | "uses" | "edit" | "bench" | "model" | "provider";
+const SORT_CYCLE: SortMode[] = ["default", "uses", "edit", "bench", "model", "provider"];
+
+type Column = "model" | "provider" | "uses" | "edit" | "bench";
+type RightColumn = "uses" | "edit" | "bench";
+const RIGHT_ORDER: RightColumn[] = ["uses", "edit", "bench"];
+/** Narrow-width drop order: Edit stays longest because toggling it is the primary action. */
+const DROP_ORDER: RightColumn[] = ["uses", "bench", "edit"];
+const HEADER_LABEL: Record<Column, string> = { model: "Model", provider: "Provider", uses: "Uses", edit: "Edit", bench: "Bench" };
+const ARROW: Record<Column, string> = { model: "▲", provider: "▲", uses: "▼", edit: "▲", bench: "▲" };
+/** Every possible Edit / Bench cell fits these fixed widths, so toggles and benchmarks never shift columns. */
+const EDIT_W = Math.max(visibleWidth("* ● hashline"), visibleWidth("* ○ replace"), visibleWidth("Edit ▲"));
+const BENCH_W = Math.max(
+	...["⟳ running…", "✗ error", "✓ faster", "✓ keep replace", "untested", "Bench ▲"].map((s) => visibleWidth(s)),
+);
+
+type BenchVerdict = "faster" | "keep" | "error" | "untested";
+const BENCH_RANK: Record<BenchVerdict, number> = { faster: 0, keep: 1, error: 2, untested: 3 };
+
+interface Layout {
+	show: boolean;
+	modelW: number;
+	provW: number;
+	leftAvail: number;
+	right: RightColumn[];
+	w: Record<RightColumn, number>;
+}
+
+interface Cell {
+	styled: string;
+	w: number;
+}
 
 export const modelKey = (m: { provider: string; id: string }): string =>
 	`${m.provider.toLowerCase()}/${m.id.toLowerCase()}`;
@@ -61,6 +95,31 @@ export function modelLabel(model: { id: string; name: string; provider: string }
 /** Sanitize untrusted strings before rendering to terminal cells. */
 function cleanCellText(s: string): string {
 	return s.replace(/[\x00-\x1f\x7f-\x9f]/g, "");
+}
+
+function padCell(cell: Cell, width: number, align: "left" | "right"): string {
+	const fill = " ".repeat(Math.max(0, width - cell.w));
+	return align === "left" ? cell.styled + fill : fill + cell.styled;
+}
+
+/** Plain-language provenance for a routing decision (no raw speedup multipliers). */
+export function describeDecision(dec: { use: EditChoice; source: string }): string {
+	const [kind, ...rest] = dec.source.split(":");
+	const detail = rest.join(":");
+	switch (kind) {
+		case "pinned":
+			return `pinned → ${dec.use}`;
+		case "calibrated":
+			return dec.use === "hashline" ? "benchmarked → faster (hashline)" : "benchmarked → keep replace";
+		case "rule": {
+			const short = detail.replace(/\*/g, "").replace(/^\/+|\/+$/g, "") || detail;
+			return `rule (${short}) → ${dec.use}`;
+		}
+		case "override":
+			return `mode ${detail} → ${dec.use}`;
+		default:
+			return `default → ${dec.use}`;
+	}
 }
 
 export interface UsageSnapshot {
@@ -167,6 +226,7 @@ export class HashlinePickerComponent {
 	private providerLo = 0;
 	private rowIndex = 0;
 	private selectedKey: string | undefined;
+	private sort: SortMode = "default";
 
 	private searchInput: Input;
 	private filteredRows: Model<Api>[] = [];
@@ -195,8 +255,9 @@ export class HashlinePickerComponent {
 		this.searchInput.focused = v;
 	}
 
-	private nowMs(): number {
-		return this.opts.now ? this.opts.now() : Date.now();
+	/** Active sort mode (`provider` collapses to `default` on single-provider tabs). */
+	get sortMode(): SortMode {
+		return this.sort === "provider" && !this.crossProvider ? "default" : this.sort;
 	}
 
 	private get tabs(): string[] {
@@ -252,6 +313,16 @@ export class HashlinePickerComponent {
 		return resolveModelDecision(this.opts.config, this.opts.overrideMode, m);
 	}
 
+	/** Bench verdict ignoring a running job, so starting Ctrl+B never reorders rows. */
+	private benchVerdict(m: Model<Api>): BenchVerdict {
+		if (this.opts.lastBenchErrors.has(modelKey(m))) return "error";
+		const cal = this.calibratedOf(m);
+		if (!cal) return "untested";
+		const pass = /^(\d+)\/(\d+)$/.exec(String(cal.passHashline ?? ""));
+		if (pass && Number(pass[1]) === 0) return "error";
+		return cal.use === "hashline" ? "faster" : "keep";
+	}
+
 	syncState(patch: {
 		allModels?: Model<Api>[];
 		currentModel?: Model<Api>;
@@ -269,75 +340,87 @@ export class HashlinePickerComponent {
 		this.applyFilter();
 	}
 
+	private byModel = (a: Model<Api>, b: Model<Api>): number =>
+		modelLabel(a).localeCompare(modelLabel(b)) || a.id.localeCompare(b.id);
+
+	private byProvider = (a: Model<Api>, b: Model<Api>): number =>
+		providerLabel(a.provider).localeCompare(providerLabel(b.provider));
+
 	private rebuildLists(): void {
 		const map = new Map<string, Model<Api>[]>();
 		for (const m of this.opts.allModels) {
 			if (!map.has(m.provider)) map.set(m.provider, []);
 			map.get(m.provider)!.push(m);
 		}
-		for (const [, arr] of map) {
-			arr.sort((a, b) => {
-				const aCur = this.isCurrent(a) ? -1 : 0;
-				const bCur = this.isCurrent(b) ? -1 : 0;
-				if (aCur !== bCur) return aCur - bCur;
-				const diffUse = this.usageCount(b) - this.usageCount(a);
-				if (diffUse !== 0) return diffUse;
-				return modelLabel(a).localeCompare(modelLabel(b));
-			});
-		}
 		this.byCategory = new Map([...map.entries()].sort(([a], [b]) => a.localeCompare(b)));
 		this.categories = Array.from(this.byCategory.keys());
-
-		this.allSorted = [...map.values()].flat().sort(
-			(a, b) =>
-				modelLabel(a).localeCompare(modelLabel(b)) ||
-				a.provider.localeCompare(b.provider) ||
-				a.id.localeCompare(b.id),
+		this.allSorted = [...map.values()].flat().sort((a, b) => this.byModel(a, b) || this.byProvider(a, b));
+		this.frequentSorted = this.allSorted.filter(
+			(m) =>
+				this.isCurrent(m) ||
+				this.isFavorite(m) ||
+				this.usageCount(m) > 0 ||
+				this.calibratedOf(m) !== undefined ||
+				this.isPinned(m),
 		);
+		this.benchmarkedSorted = this.allSorted.filter(
+			(m) => this.calibratedOf(m) !== undefined || this.opts.runningJobs.has(modelKey(m)),
+		);
+	}
 
-		this.frequentSorted = this.allSorted
-			.filter(
-				(m) =>
-					this.isCurrent(m) ||
-					this.isFavorite(m) ||
-					this.usageCount(m) > 0 ||
-					this.calibratedOf(m) !== undefined ||
-					this.isPinned(m),
-			)
-			.sort((a, b) => {
-				const aCur = this.isCurrent(a) ? 1 : 0;
-				const bCur = this.isCurrent(b) ? 1 : 0;
-				if (aCur !== bCur) return bCur - aCur;
-				const aFav = this.isFavorite(a) ? 1 : 0;
-				const bFav = this.isFavorite(b) ? 1 : 0;
-				const diffCount = this.usageCount(b) - this.usageCount(a);
-				if (diffCount !== 0) return diffCount;
-				if (aFav !== bFav) return bFav - aFav;
-				const aCal = this.calibratedOf(a) ? 1 : 0;
-				const bCal = this.calibratedOf(b) ? 1 : 0;
-				if (aCal !== bCal) return bCal - aCal;
-				return modelLabel(a).localeCompare(modelLabel(b));
-			});
+	private sortRows(rows: Model<Api>[]): Model<Api>[] {
+		const mode = this.sortMode;
+		const byUses = (a: Model<Api>, b: Model<Api>) =>
+			this.usageCount(b) - this.usageCount(a) ||
+			Number(this.isFavorite(b)) - Number(this.isFavorite(a)) ||
+			this.byModel(a, b) ||
+			this.byProvider(a, b);
+		const byModelProv = (a: Model<Api>, b: Model<Api>) => this.byModel(a, b) || this.byProvider(a, b);
+		let cmp: (a: Model<Api>, b: Model<Api>) => number;
+		switch (mode) {
+			case "uses":
+				cmp = byUses;
+				break;
+			case "edit":
+				cmp = (a, b) => {
+					const da = this.decisionOf(a);
+					const db = this.decisionOf(b);
+					return (
+						Number(db.use === "hashline") - Number(da.use === "hashline") ||
+						Number(db.source.startsWith("pinned:")) - Number(da.source.startsWith("pinned:")) ||
+						byModelProv(a, b)
+					);
+				};
+				break;
+			case "bench":
+				cmp = (a, b) => BENCH_RANK[this.benchVerdict(a)] - BENCH_RANK[this.benchVerdict(b)] || byModelProv(a, b);
+				break;
+			case "model":
+				cmp = byModelProv;
+				break;
+			case "provider":
+				cmp = (a, b) => this.byProvider(a, b) || this.byModel(a, b);
+				break;
+			default:
+				if (this.currentTab() === FREQUENT_TAB) cmp = byUses;
+				else if (this.crossProvider) cmp = byModelProv;
+				else cmp = (a, b) => Number(this.isCurrent(b)) - Number(this.isCurrent(a)) || byModelProv(a, b);
+		}
+		return [...rows].sort(cmp);
+	}
 
-		this.benchmarkedSorted = this.allSorted
-			.filter((m) => this.calibratedOf(m) !== undefined || this.opts.runningJobs.has(modelKey(m)))
-			.sort((a, b) => {
-				const aRun = this.opts.runningJobs.has(modelKey(a)) ? 1 : 0;
-				const bRun = this.opts.runningJobs.has(modelKey(b)) ? 1 : 0;
-				if (aRun !== bRun) return bRun - aRun;
-				const aSpd = this.calibratedOf(a)?.speedup ?? 0;
-				const bSpd = this.calibratedOf(b)?.speedup ?? 0;
-				if (bSpd !== aSpd) return bSpd - aSpd;
-				return modelLabel(a).localeCompare(modelLabel(b));
-			});
+	private activeSortColumn(): Column {
+		const mode = this.sortMode;
+		if (mode === "default") return this.currentTab() === FREQUENT_TAB ? "uses" : "model";
+		return mode;
 	}
 
 	private applyFilter(): void {
 		const query = this.searchInput.getValue().trim();
 		const searchText = (m: Model<Api>) =>
-			`${m.name} ${m.id} ${m.provider} ${this.decisionOf(m).use} ${this.calibratedOf(m) ? "benchmarked" : "unbenched"}`;
+			`${m.name} ${m.id} ${m.provider} ${this.decisionOf(m).use} ${this.calibratedOf(m) ? "benchmarked" : "untested"}`;
 		this.globalMatches = fuzzyFilter(this.allSorted, query, searchText);
-		this.filteredRows = fuzzyFilter(this.tabSource(this.currentTab()), query, searchText);
+		this.filteredRows = fuzzyFilter(this.sortRows(this.tabSource(this.currentTab())), query, searchText);
 		this.matchingProviders = new Set(this.globalMatches.map((m) => m.provider));
 
 		if (this.selectedKey) {
@@ -349,6 +432,17 @@ export class HashlinePickerComponent {
 		}
 		this.rowIndex = Math.max(0, Math.min(this.rowIndex, this.filteredRows.length - 1));
 		this.selectedKey = this.filteredRows[this.rowIndex] ? modelKey(this.filteredRows[this.rowIndex]!) : undefined;
+	}
+
+	private cycleSort(): void {
+		let idx = SORT_CYCLE.indexOf(this.sortMode);
+		do {
+			idx = (idx + 1) % SORT_CYCLE.length;
+		} while (SORT_CYCLE[idx] === "provider" && !this.crossProvider);
+		this.sort = SORT_CYCLE[idx]!;
+		const sel = this.filteredRows[this.rowIndex];
+		if (sel) this.selectedKey = modelKey(sel);
+		this.applyFilter();
 	}
 
 	private switchCategory(delta: number): void {
@@ -393,7 +487,14 @@ export class HashlinePickerComponent {
 		this.applyFilter();
 	}
 
+	private moveTo(idx: number): void {
+		if (!this.filteredRows.length) return;
+		this.rowIndex = idx;
+		this.selectedKey = modelKey(this.filteredRows[this.rowIndex]!);
+	}
+
 	handleInput(data: string): void {
+		const n = this.filteredRows.length;
 		if (matchesKey(data, Key.ctrl("b"))) {
 			const sel = this.filteredRows[this.rowIndex];
 			if (sel) {
@@ -405,58 +506,28 @@ export class HashlinePickerComponent {
 			return;
 		}
 		if (matchesKey(data, Key.ctrl("s"))) {
-			this.swapSelected();
+			this.cycleSort();
 			return;
 		}
 		if (matchesKey(data, Key.ctrl("u"))) {
 			this.unpinSelected();
 			return;
 		}
-		if (matchesKey(data, Key.ctrl("g"))) {
+		if (matchesKey(data, Key.ctrl("o"))) {
 			this.opts.overrideMode = this.opts.onCycleOverrideMode();
 			this.applyFilter();
 			return;
 		}
-		if (matchesKey(data, Key.tab)) {
-			this.switchCategory(1);
-			return;
-		}
-		if (matchesKey(data, Key.shift("tab"))) {
-			this.switchCategory(-1);
-			return;
-		}
-		if (matchesKey(data, Key.shift("up"))) {
-			if (!this.filteredRows.length) return;
-			this.rowIndex = Math.max(0, this.rowIndex - 10);
-			this.selectedKey = modelKey(this.filteredRows[this.rowIndex]!);
-			return;
-		}
-		if (matchesKey(data, Key.shift("down"))) {
-			if (!this.filteredRows.length) return;
-			this.rowIndex = Math.max(0, Math.min(this.filteredRows.length - 1, this.rowIndex + 10));
-			this.selectedKey = modelKey(this.filteredRows[this.rowIndex]!);
-			return;
-		}
-		if (matchesKey(data, Key.up)) {
-			if (!this.filteredRows.length) return;
-			this.rowIndex = this.rowIndex === 0 ? this.filteredRows.length - 1 : this.rowIndex - 1;
-			this.selectedKey = modelKey(this.filteredRows[this.rowIndex]!);
-			return;
-		}
-		if (matchesKey(data, Key.down)) {
-			if (!this.filteredRows.length) return;
-			this.rowIndex = this.rowIndex === this.filteredRows.length - 1 ? 0 : this.rowIndex + 1;
-			this.selectedKey = modelKey(this.filteredRows[this.rowIndex]!);
-			return;
-		}
-		if (matchesKey(data, Key.left) && this.searchInput.getValue() === "") {
-			this.switchCategory(-1);
-			return;
-		}
-		if (matchesKey(data, Key.right) && this.searchInput.getValue() === "") {
-			this.switchCategory(1);
-			return;
-		}
+		// Ctrl+G is Zellij's unlock key: swallow it so it never changes picker state.
+		if (matchesKey(data, Key.ctrl("g"))) return;
+		if (matchesKey(data, Key.tab)) return this.switchCategory(1);
+		if (matchesKey(data, Key.shift("tab"))) return this.switchCategory(-1);
+		if (matchesKey(data, Key.shift("up"))) return this.moveTo(Math.max(0, this.rowIndex - 10));
+		if (matchesKey(data, Key.shift("down"))) return this.moveTo(Math.max(0, Math.min(n - 1, this.rowIndex + 10)));
+		if (matchesKey(data, Key.up)) return this.moveTo(this.rowIndex === 0 ? n - 1 : this.rowIndex - 1);
+		if (matchesKey(data, Key.down)) return this.moveTo(this.rowIndex === n - 1 ? 0 : this.rowIndex + 1);
+		if (matchesKey(data, Key.left) && this.searchInput.getValue() === "") return this.switchCategory(-1);
+		if (matchesKey(data, Key.right) && this.searchInput.getValue() === "") return this.switchCategory(1);
 
 		const before = this.searchInput.getValue();
 		this.searchInput.handleInput(data);
@@ -466,6 +537,77 @@ export class HashlinePickerComponent {
 			this.selectedKey = undefined;
 			this.applyFilter();
 		}
+	}
+
+	/** Column widths measured over every row of the active tab plus headers-with-arrow and fixed Edit/Bench widths. */
+	private layout(width: number): Layout {
+		const rows = this.tabSource(this.currentTab());
+		const show = this.crossProvider;
+		const hw = (c: Column) => visibleWidth(`${HEADER_LABEL[c]} ${ARROW[c]}`);
+		const model = Math.max(hw("model"), ...rows.map((m) => visibleWidth(cleanCellText(modelLabel(m))) + 2));
+		const provider = show
+			? Math.max(hw("provider"), ...rows.map((m) => visibleWidth(`[${cleanCellText(providerLabel(m.provider))}]`)))
+			: 0;
+		const w: Record<RightColumn, number> = {
+			uses: Math.max(hw("uses"), ...rows.map((m) => visibleWidth(this.fmtUses(m)))),
+			edit: EDIT_W,
+			bench: BENCH_W,
+		};
+		const right = [...RIGHT_ORDER];
+		const rightW = () => right.reduce((s, k) => s + 2 + w[k], 0);
+		const leftMin = 2 + Math.min(model, 12) + (show ? 2 + Math.min(provider, 8) : 0);
+		for (const col of DROP_ORDER) {
+			if (leftMin + rightW() <= width) break;
+			right.splice(right.indexOf(col), 1);
+		}
+		const leftAvail = Math.max(0, width - rightW());
+		let modelW = model;
+		let provW = provider;
+		let over = 2 + modelW + (show ? 2 + provW : 0) - leftAvail;
+		const shrink = (cur: number, floor: number): number => {
+			const d = Math.min(over, Math.max(0, cur - floor));
+			over -= d;
+			return cur - d;
+		};
+		if (over > 0) modelW = shrink(modelW, 18);
+		if (over > 0 && show) provW = shrink(provW, 8);
+		if (over > 0) modelW = shrink(modelW, 4);
+		return { show, modelW, provW, leftAvail, right, w };
+	}
+
+	/** Compose a header or data row from per-column cells; headers and rows share this exact geometry. */
+	private compose(L: Layout, prefix: Cell, cells: Record<Column, Cell>): string {
+		let out = prefix.styled + padCell(cells.model, L.modelW, "left");
+		let used = prefix.w + L.modelW;
+		if (L.show) {
+			out += "  " + padCell(cells.provider, L.provW, "left");
+			used += 2 + L.provW;
+		}
+		out += " ".repeat(Math.max(0, L.leftAvail - used));
+		for (const k of L.right) out += "  " + padCell(cells[k], L.w[k], "right");
+		return out;
+	}
+
+	private renderHeader(L: Layout, theme: any): string {
+		const hasQuery = this.searchInput.getValue().trim() !== "";
+		const active = hasQuery ? undefined : this.activeSortColumn();
+		const cell = (c: Column, maxW: number): Cell => {
+			const isActive = c === active;
+			const plain = isActive ? `${HEADER_LABEL[c]} ${ARROW[c]}` : HEADER_LABEL[c];
+			const text = truncateToWidth(plain, Math.max(1, maxW), "");
+			const styled = isActive ? theme.bold(theme.fg("accent", text)) : theme.fg("dim", text);
+			// Inactive labels reserve the arrow slot so label x-offsets never move when the sort changes.
+			const slot = visibleWidth(` ${ARROW[c]}`);
+			const fill = isActive ? 0 : Math.min(slot, Math.max(0, maxW - visibleWidth(text)));
+			return { styled: styled + " ".repeat(fill), w: visibleWidth(text) + fill };
+		};
+		return this.compose(L, { styled: "  ", w: 2 }, {
+			model: cell("model", L.modelW),
+			provider: cell("provider", L.provW),
+			uses: cell("uses", L.w.uses),
+			edit: cell("edit", L.w.edit),
+			bench: cell("bench", L.w.bench),
+		});
 	}
 
 	render(width: number, theme: any): string[] {
@@ -501,7 +643,10 @@ export class HashlinePickerComponent {
 		const promptW = visibleWidth(promptText);
 		const inputLines = this.searchInput.render(Math.max(0, width - promptW));
 		lines.push(theme.fg("muted", promptText) + (inputLines[0] ?? ""));
-		lines.push("");
+
+		// Column header row (replaces the old blank spacer, so picker height is unchanged)
+		const L = this.layout(width);
+		lines.push(this.renderHeader(L, theme));
 
 		// Model rows
 		const MAX_VISIBLE = 10;
@@ -526,49 +671,26 @@ export class HashlinePickerComponent {
 			}
 			lines.push(theme.fg("muted", truncateToWidth(msg, width)));
 		} else {
-			const showProvider = this.crossProvider;
-			const measured = showProvider ? rows : visible;
-			const colW = {
-				name: showProvider ? Math.max(...rows.map((m) => visibleWidth(cleanCellText(modelLabel(m))))) : 0,
-				provider: showProvider
-					? Math.max(...rows.map((m) => visibleWidth(`[${cleanCellText(providerLabel(m.provider))}]`)))
-					: 0,
-				usage: Math.max(0, ...measured.map((m) => visibleWidth(this.fmtUsage(m)))),
-				edit: Math.max(0, ...measured.map((m) => visibleWidth(this.fmtEditCell(m).text))),
-				bench: Math.max(0, ...measured.map((m) => visibleWidth(this.fmtBenchCell(m).text))),
-			};
-			// Drop optional metadata columns gracefully on narrow widths: usage first, then bench, keeping edit mode visible.
-			for (const column of ["usage", "bench"] as const) {
-				const rightW = [colW.usage, colW.edit, colW.bench].filter(Boolean).reduce((s, n) => s + n + 2, -2);
-				const leftMin = showProvider ? Math.min(colW.name, 26) + Math.min(colW.provider, 16) + 8 : 22;
-				if (Math.max(0, rightW) + leftMin <= width) break;
-				colW[column] = 0;
-			}
-
 			for (let i = 0; i < visible.length; i++) {
 				const model = visible[i]!;
 				const absIdx = start + i;
-				const isSelected = absIdx === this.rowIndex;
-				const isCurrent = this.isCurrent(model);
 				const fuzzyHighlight = hasQuery ? (absIdx === 0 ? "top" : "match") : undefined;
-				lines.push(this.renderRow(model, isSelected, isCurrent, width, theme, colW, fuzzyHighlight));
+				lines.push(this.renderRow(model, absIdx === this.rowIndex, this.isCurrent(model), L, theme, fuzzyHighlight));
 			}
 		}
 
 		for (let i = Math.max(1, visible.length); i < MAX_VISIBLE; i++) lines.push("");
 
-		// Status/detail footer line (1 fixed line so height never jumps)
+		// Status/provenance line (1 fixed line so height never jumps)
 		const position = rows.length ? this.rowIndex + 1 : 0;
 		const selected = rows[this.rowIndex];
 		let detailLine = `  (${position}/${rows.length})`;
 		if (selected) {
-			const key = modelKey(selected);
-			const dec = this.decisionOf(selected);
-			const err = this.opts.lastBenchErrors.get(key);
-			detailLine += ` ${selected.provider}/${selected.id} → ${dec.use} [${dec.source}]`;
+			const err = this.opts.lastBenchErrors.get(modelKey(selected));
+			detailLine += ` ${cleanCellText(`${selected.provider}/${selected.id}`)} · ${describeDecision(this.decisionOf(selected))}`;
 			if (err) detailLine += ` · err: ${cleanCellText(err)}`;
 		}
-		const legend = "  ● green=hashline  ● gold=pinned/running";
+		const legend = "  ● hashline  ● pinned/running";
 		const detailGap = width - visibleWidth(detailLine) - visibleWidth(legend);
 		if (detailGap >= 2) {
 			lines.push(
@@ -585,65 +707,43 @@ export class HashlinePickerComponent {
 
 		// Help bar
 		lines.push(theme.fg("border", "─".repeat(width)));
-		const help = [
-			"↑↓ navigate",
-			"←→/Tab tabs",
-			"Enter swap edit",
-			"Ctrl+B benchmark",
-			"Ctrl+U unpin",
-			"Ctrl+G mode",
-			"Esc close",
-		].join(" · ");
-		lines.push(theme.fg("dim", truncateToWidth("  " + help, width)));
+		const help = "Enter swap · Ctrl+S sort · Ctrl+B bench · Ctrl+U unpin · Ctrl+O mode · Tab tabs · Esc close";
+		lines.push(theme.fg("dim", truncateToWidth("  " + help, width, "…")));
 		lines.push(theme.fg("accent", "─".repeat(width)));
 
 		return lines.map((l) => truncateToWidth(l, width));
 	}
 
-	private fmtUsage(m: Model<Api>): string {
+	private fmtUses(m: Model<Api>): string {
 		const n = this.usageCount(m);
-		const fav = this.isFavorite(m);
-		if (fav && n > 0) return `★ ${n}×`;
-		if (fav) return "★ fav";
-		if (n > 0) return `${n}×`;
-		return "";
+		const count = n > 0 ? String(n) : "—";
+		return this.isFavorite(m) ? `★ ${count}` : count;
 	}
 
-	private fmtEditCell(m: Model<Api>): { text: string; color: string } {
+	private editCell(m: Model<Api>, theme: any, bold: (s: string) => string): Cell {
+		if (this.opts.overrideMode === "off") return { styled: theme.fg("muted", bold("○ off")), w: visibleWidth("○ off") };
 		const dec = this.decisionOf(m);
 		const pinned = dec.source.startsWith("pinned:");
-		if (dec.use === "hashline") {
-			return {
-				text: pinned ? "● hashline *" : "● hashline",
-				color: pinned ? "warning" : "success",
-			};
-		}
-		return {
-			text: pinned ? "○ replace *" : "○ replace",
-			color: pinned ? "warning" : "muted",
-		};
+		const body = dec.use === "hashline" ? "● hashline" : "○ replace";
+		const styled = theme.fg(dec.use === "hashline" ? "success" : "muted", bold(body));
+		return pinned
+			? { styled: theme.fg("warning", bold("*")) + " " + styled, w: visibleWidth(`* ${body}`) }
+			: { styled, w: visibleWidth(body) };
 	}
 
-	private fmtBenchCell(m: Model<Api>): { text: string; color: string } {
-		const key = modelKey(m);
-		const job = this.opts.runningJobs.get(key);
-		if (job) {
-			const secs = Math.max(0, Math.floor((this.nowMs() - job.startedAt) / 1000));
-			return { text: `⟳ benching ${secs}s…`, color: "warning" };
+	private benchCell(m: Model<Api>, theme: any, bold: (s: string) => string): Cell {
+		const mk = (text: string, color: string): Cell => ({ styled: theme.fg(color, bold(text)), w: visibleWidth(text) });
+		if (this.opts.runningJobs.has(modelKey(m))) return mk("⟳ running…", "warning");
+		switch (this.benchVerdict(m)) {
+			case "error":
+				return mk("✗ error", "error");
+			case "faster":
+				return mk("✓ faster", "success");
+			case "keep":
+				return mk("✓ keep replace", "muted");
+			default:
+				return mk("untested", "dim");
 		}
-		if (this.opts.lastBenchErrors.has(key)) {
-			return { text: "✗ bench err", color: "error" };
-		}
-		const cal = this.calibratedOf(m);
-		if (!cal) {
-			return { text: "· unbenched", color: "dim" };
-		}
-		const spd = `${cal.speedup.toFixed(2)}x`;
-		const shrink = cal.bytesRatio >= 1.05 ? ` ${cal.bytesRatio.toFixed(1)}x↓` : "";
-		return {
-			text: `✓ ${spd}${shrink}`,
-			color: cal.use === "hashline" ? "success" : "muted",
-		};
 	}
 
 	private renderTabs(width: number, theme: any): string {
@@ -717,64 +817,40 @@ export class HashlinePickerComponent {
 		model: Model<Api>,
 		isSelected: boolean,
 		isCurrent: boolean,
-		width: number,
+		L: Layout,
 		theme: any,
-		colW: { name: number; provider: number; usage: number; edit: number; bench: number },
 		fuzzyHighlight?: "match" | "top",
 	): string {
-		const prefix = isSelected ? "▶ " : "  ";
+		const bold = (s: string) => (isSelected ? theme.bold(s) : s);
 		const dec = this.decisionOf(model);
-		const running = this.opts.runningJobs.has(modelKey(model));
 		const pinned = dec.source.startsWith("pinned:");
-
-		// Big dot glyph right after model name (exact pi-picks style):
-		//   running benchmark   → gold ` ●`
-		//   pinned hashline     → gold ` ●`
-		//   active hashline     → green ` ●`
-		//   replace             → no dot (clean contrast)
-		const dotColor = running ? "warning" : dec.use === "hashline" ? (pinned ? "warning" : "success") : undefined;
-		const dot = dotColor ? " ●" : "";
-
-		const usageStr = colW.usage ? this.fmtUsage(model).padStart(colW.usage) : "";
-		const editCell = this.fmtEditCell(model);
-		const editPadded = colW.edit ? editCell.text.padEnd(colW.edit) : "";
-		const benchCell = this.fmtBenchCell(model);
-		const benchPadded = colW.bench ? benchCell.text.padEnd(colW.bench) : "";
-
-		const rightPlain = [usageStr, editPadded, benchPadded].filter(Boolean).join("  ");
-		const rightStyled = [
-			usageStr ? theme.fg(isSelected ? "accent" : "dim", usageStr) : "",
-			editPadded ? theme.fg(editCell.color, isSelected ? theme.bold(editPadded) : editPadded) : "",
-			benchPadded ? theme.fg(benchCell.color, isSelected ? theme.bold(benchPadded) : benchPadded) : "",
-		]
-			.filter(Boolean)
-			.join("  ");
-
-		const showProvider = this.crossProvider;
-		const nameAvail = Math.max(
-			6,
-			width - visibleWidth(prefix) - visibleWidth(rightPlain) - (showProvider ? 2 : visibleWidth(dot)) - 2,
-		);
-		const providerWidth = showProvider ? Math.min(colW.provider, Math.max(0, nameAvail - 12)) : 0;
-		const nameWidth = showProvider ? Math.min(colW.name, Math.max(6, nameAvail - providerWidth - 2)) : nameAvail;
-		const cleanName = cleanCellText(modelLabel(model));
-		const name = truncateToWidth(cleanName, nameWidth);
-		const provider =
-			showProvider && providerWidth >= 4
-				? `[${truncateToWidth(cleanCellText(providerLabel(model.provider)), providerWidth - 2)}]`
-				: "";
-		const tail = showProvider
-			? " ".repeat(Math.max(0, nameWidth + 2 - visibleWidth(name + dot))) + (provider ? "  " + provider : "")
-			: "";
-		const gap = " ".repeat(Math.max(1, width - visibleWidth(prefix + name + dot + tail) - visibleWidth(rightPlain)));
-
+		const running = this.opts.runningJobs.has(modelKey(model));
+		// Big dot glyph after the model name: gold when pinned/running, green for hashline, dim for replace/off.
+		const dotColor = pinned || running ? "warning" : dec.use === "hashline" ? "success" : "dim";
 		const rowColor = isSelected ? "accent" : isCurrent ? "success" : "text";
-		const left =
-			theme.fg(rowColor, prefix + name) +
-			(dotColor ? theme.fg(dotColor, theme.bold(dot)) : "") +
-			(tail ? theme.fg(isSelected ? "accent" : isCurrent ? "success" : "muted", tail) : "");
+		const sideColor = isSelected ? "accent" : isCurrent ? "success" : "muted";
 
-		const line = left + gap + rightStyled;
+		const name = truncateToWidth(cleanCellText(modelLabel(model)), Math.max(1, L.modelW - 2), "…");
+		const modelCell: Cell = {
+			styled: theme.fg(rowColor, name) + theme.fg(dotColor, theme.bold(" ●")),
+			w: visibleWidth(name) + 2,
+		};
+		const provText = L.show ? truncateToWidth(`[${cleanCellText(providerLabel(model.provider))}]`, L.provW, "…") : "";
+		const fav = this.isFavorite(model);
+		const usesText = this.fmtUses(model);
+		const countText = fav ? usesText.slice(2) : usesText;
+		const usesCell: Cell = {
+			styled: (fav ? theme.fg("warning", "★ ") : "") + theme.fg(isSelected ? "accent" : "dim", countText),
+			w: visibleWidth(usesText),
+		};
+
+		const line = this.compose(L, { styled: theme.fg(rowColor, isSelected ? "▶ " : "  "), w: 2 }, {
+			model: modelCell,
+			provider: { styled: theme.fg(sideColor, provText), w: visibleWidth(provText) },
+			uses: usesCell,
+			edit: this.editCell(model, theme, bold),
+			bench: this.benchCell(model, theme, bold),
+		});
 		const fuzzyBg =
 			fuzzyHighlight === "top" ? "searchMatchBg" : fuzzyHighlight === "match" ? "toolPendingBg" : undefined;
 		return fuzzyBg ? theme.bg(fuzzyBg, line) : line;
@@ -911,7 +987,7 @@ export async function openHashlineMenu(opts: OpenHashlineMenuOptions): Promise<v
 					if (entry) {
 						try {
 							ctx.ui.notify(
-								`hashline bench ${key}: ${entry.use} (${entry.speedup}x, ${entry.bytesRatio}x smaller)`,
+								`hashline bench ${key}: ${entry.use === "hashline" ? "faster → hashline" : "keep replace"}`,
 								"info",
 							);
 						} catch {}

@@ -19,9 +19,15 @@ Runtime overrides (`PI_HASHLINE` env var or `/hashline` command):
 - `/hashline auto | all | force | off` — switch session override mode
 - `/hashline stats` — summarize recorded calls from `~/.pi/agent/hashline-stats.jsonl`
 
+## Picker (`/hashline` menu, Alt+H)
+
+Columns: **Model** (`●` green = hashline, dim = replace/off, gold = pinned/running), **Provider** (cross-provider tabs only), **Uses** (session count, `★` = pi-picks favorite), **Edit** (`● hashline` / `○ replace`, `*` = pinned), **Bench** (`✓ faster`, `✓ keep replace`, `✗ error`, `untested`). A fixed header row shows the active sort; column positions never shift while scrolling, toggling, or sorting, and narrow terminals drop Uses, then Bench, then Edit.
+
+Keys: `Enter` swap edit tool (pins the model) · `Ctrl+S` cycle sort (default → Uses → Edit → Bench → Model → Provider) · `Ctrl+B` run/stop benchmark · `Ctrl+U` unpin · `Ctrl+O` cycle mode (auto → all → force → off; `Ctrl+G` is left to Zellij) · `Tab` tabs · `Esc` close.
+
 ## Deterministic Calibrator (`calibrate.mjs`)
 
-Runs two bash-free, 2-turn (`read` -> `edit`) multi-hunk refactoring micro-tasks head-to-head (`replace` vs `hashline`, starting both arms simultaneously per task and verifying output with strict Node assertions in `<20 ms`), then writes each model's measured verdict, speedup, and payload byte ratio into `~/.pi/agent/hashline.json`:
+Runs two bash-free, 2-turn (`read` -> `edit`) multi-hunk refactoring micro-tasks head-to-head (`replace` vs `hashline`, starting both arms simultaneously per task and verifying output with strict Node assertions in `<20 ms`), then writes each model's verdict (plus raw timing/byte fields, which the picker summarizes only as faster / keep replace) into `~/.pi/agent/hashline.json`:
 
 ```sh
 # Calibrate default roster across major provider families (~45-90s total)

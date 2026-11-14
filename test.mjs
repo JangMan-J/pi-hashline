@@ -242,44 +242,41 @@ assert.equal(moveEdit.isError, undefined, moveEdit.content[0].text);
 assert.equal(fs.existsSync(destPath), false);
 assert.ok(fs.readFileSync(path.join(tmp, "src/moved_dest.py"), "utf8").includes("def compute(x):"));
 
-// 8. TUI Picker deterministic tests (frame widths, Frequent ordering, Search vs Ctrl+B / Enter / Ctrl+U / Tab / Esc)
+// 8. TUI Picker deterministic tests (header row geometry, sort cycle, hotkeys, honest bench verdicts)
 const pickerMod = await jiti.import(path.resolve("picker.ts"));
 const tuiMod = await jiti.import(path.join(piPkgRoot, "../pi-tui/dist/index.js"));
 const { HashlinePickerComponent } = pickerMod;
 const { visibleWidth } = tuiMod;
 
-const plainTheme = {
-	fg: (_c, s) => s,
-	bg: (_c, s) => s,
-	bold: (s) => s,
-};
+const plainTheme = { fg: (_c, s) => s, bg: (_c, s) => s, bold: (s) => s };
+// Marks bold+accent so the active sorted header is observable (only used for header-style checks).
+const markTheme = { fg: (c, s) => (c === "accent" ? `\x1b[36m${s}\x1b[39m` : s), bg: (_c, s) => s, bold: (s) => `\x1b[1m${s}\x1b[22m` };
 
-let fakeClock = 1_000_000;
+const calEntry = (use, passHashline = "2/2", speedup = 2.0) => ({
+	use, speedup, bytesRatio: 5.08, passReplace: "2/2", passHashline,
+	replaceEditMs: 16324, hashlineEditMs: 8161, replaceBytes: 4468, hashlineBytes: 879,
+	thinking: "high", reason: "test", measuredAt: new Date().toISOString(),
+});
+
 let closed = false;
 const runningJobs = new Map();
 const benchErrors = new Map();
 let pickerCfg = cfgMod.loadConfigSync(process.env.PI_CODING_AGENT_DIR);
-pickerCfg.calibrated["antigravity/gemini-4-argon"] = {
-	use: "hashline",
-	speedup: 2.0,
-	bytesRatio: 5.08,
-	passReplace: "2/2",
-	passHashline: "2/2",
-	replaceEditMs: 16324,
-	hashlineEditMs: 8161,
-	replaceBytes: 4468,
-	hashlineBytes: 879,
-	thinking: "high",
-	reason: "2.0x faster",
-	measuredAt: new Date().toISOString(),
-};
+pickerCfg.calibrated["antigravity/gemini-4-argon"] = calEntry("hashline");
+pickerCfg.calibrated["anthropic/claude-opus-5-5"] = calEntry("replace", "2/2", 0.95);
+pickerCfg.calibrated["zeta-lab/zeta-1"] = calEntry("replace", "0/2", 0.5);
 let curOverride = "auto";
 
 const catalog = [
-	{ provider: "openai-codex", id: "gpt-6-astra", name: "GPT-6 Astra", contextWindow: 272000, reasoning: true, input: ["text", "image"], cost: { input: 10, output: 50 } },
-	{ provider: "anthropic", id: "claude-opus-5-5", name: "Claude Opus 5.5", contextWindow: 1000000, reasoning: true, input: ["text", "image"], cost: { input: 4, output: 20 } },
-	{ provider: "antigravity", id: "gemini-4-argon", name: "Gemini 4 Argon", contextWindow: 1000000, reasoning: true, input: ["text", "image"], cost: { input: 2, output: 10 } },
-	{ provider: "kimi-coding", id: "k3.1-pro-highspeed", name: "Kimi K3.1 Pro Highspeed", contextWindow: 1000000, reasoning: true, input: ["text", "image"], cost: { input: 4, output: 20 } },
+	{ provider: "openai-codex", id: "gpt-6-astra", name: "GPT-6 Astra" },
+	{ provider: "anthropic", id: "claude-opus-5-5", name: "Claude Opus 5.5" },
+	{ provider: "antigravity", id: "gemini-4-argon", name: "Gemini 4 Argon" },
+	{ provider: "kimi-coding", id: "k3.1-pro-highspeed", name: "Kimi K3.1 Pro Highspeed" },
+	...Array.from({ length: 12 }, (_, i) => ({
+		provider: "zeta-lab",
+		id: `zeta-${i + 1}`,
+		name: i === 11 ? "Zeta Ultra Long Reasoning Model Preview Edition" : `Zeta ${String.fromCharCode(65 + i)}${"x".repeat(i)}`,
+	})),
 ];
 
 const usage = {
@@ -287,19 +284,20 @@ const usage = {
 		["openai-codex/gpt-6-astra", 432],
 		["anthropic/claude-opus-5-5", 388],
 		["antigravity/gemini-4-argon", 223],
+		...Array.from({ length: 12 }, (_, i) => [`zeta-lab/zeta-${i + 1}`, i + 1]),
 	]),
 	favorites: new Set(["antigravity/gemini-4-argon"]),
 };
 
 const picker = new HashlinePickerComponent({
 	allModels: catalog,
-	currentModel: catalog[1], // Claude Opus 5.5 current -> sorts first on Frequent!
+	currentModel: catalog[1], // Claude Opus 5.5 current -> selected on open
 	usage,
 	config: pickerCfg,
 	overrideMode: curOverride,
 	runningJobs,
 	lastBenchErrors: benchErrors,
-	now: () => fakeClock,
+	now: () => 1_000_000,
 	onToggleModel(m, nextUse) {
 		const key = `${m.provider}/${m.id}`.toLowerCase();
 		pickerCfg.rules = pickerCfg.rules.filter((r) => !(r.pinned && r.match.toLowerCase() === key));
@@ -319,49 +317,188 @@ const picker = new HashlinePickerComponent({
 	onToggleBenchmark(m) {
 		const key = `${m.provider}/${m.id}`.toLowerCase();
 		if (runningJobs.has(key)) runningJobs.delete(key);
-		else runningJobs.set(key, { startedAt: fakeClock - 5000, gen: 1 });
+		else runningJobs.set(key, { startedAt: 995_000, gen: 1 });
 	},
 	onClose() {
 		closed = true;
 	},
 });
 
-// Verify width bounds across wide, narrow, and tiny viewports
-for (const w of [120, 76, 48, 22]) {
-	const frame = picker.render(w, plainTheme);
-	for (const ln of frame) {
-		assert.ok(visibleWidth(ln) <= w, `line exceeded width ${w}: ${visibleWidth(ln)} "${ln}"`);
+const KEY = { enter: "\r", down: "\x1b[B", tab: "\t", ctrlB: "\x02", ctrlS: "\x13", ctrlU: "\x15", ctrlO: "\x0f", ctrlG: "\x07", bksp: "\x7f" };
+const HEADER_ROW = 6;
+const ROWS = [7, 17];
+const allFrames = [];
+const render = (w, theme = plainTheme) => {
+	const f = picker.render(w, theme);
+	allFrames.push(f);
+	for (const ln of f) assert.ok(visibleWidth(ln) <= w, `line exceeded width ${w}: ${visibleWidth(ln)} "${ln}"`);
+	return f;
+};
+const xOf = (line, idx) => visibleWidth(line.slice(0, idx));
+const EDIT_RE = /(?:\* )?[●○] (?:hashline|replace|off)/g;
+const BENCH_RE = /⟳ running…|✗ error|✓ faster|✓ keep replace|untested/;
+const selectedRow = (f) => f.slice(...ROWS).find((l) => l.startsWith("▶ "));
+
+/** Header x-offsets plus every row's Edit end / Provider start / Bench end; must be identical across actions. */
+function geometry(w) {
+	const f = render(w);
+	const hdr = f[HEADER_ROW];
+	const off = {};
+	for (const label of ["Model", "Provider", "Uses", "Edit", "Bench"]) {
+		const i = hdr.indexOf(label);
+		off[label] = i < 0 ? -1 : xOf(hdr, i);
 	}
+	const editEnds = new Set();
+	const provStarts = new Set();
+	const benchEnds = new Set();
+	for (const row of f.slice(...ROWS)) {
+		if (!row.trim()) continue;
+		const m = [...row.matchAll(EDIT_RE)].pop();
+		assert.ok(m, `row without edit cell: "${row}"`);
+		editEnds.add(xOf(row, m.index + m[0].length));
+		if (off.Provider >= 0) provStarts.add(xOf(row, row.search(/\[[A-Z]/)));
+		const b = BENCH_RE.exec(row);
+		assert.ok(b, `row without bench cell: "${row}"`);
+		benchEnds.add(xOf(row, b.index + b[0].length));
+	}
+	assert.deepEqual([...editEnds], [off.Edit + 6], `edit cells misaligned with header at ${w}:\n${f.join("\n")}`);
+	if (off.Provider >= 0) assert.deepEqual([...provStarts], [off.Provider], `provider cells misaligned at ${w}:\n${f.join("\n")}`);
+	assert.deepEqual([...benchEnds], [w], `bench cells not right-anchored at ${w}`);
+	return JSON.stringify({ off, height: f.length });
 }
 
-// Current model (Claude Opus 5.5) is selected first on Frequent and uses `○ replace`
-let frame110 = picker.render(110, plainTheme).join("\n");
-assert.ok(frame110.includes("▶ Claude Opus 5.5"), frame110);
-assert.ok(frame110.includes("○ replace"), frame110);
-assert.ok(frame110.includes("✓ 2.00x 5.1x↓"), frame110);
+// Initial: Frequent tab, Claude (current) selected, header row replaces the blank spacer.
+let f120 = render(120);
+const emptySearchLine = f120[5];
+assert.ok(emptySearchLine.startsWith("  Search: "));
+assert.match(f120[HEADER_ROW], /^ {2}Model ▲? *Provider *Uses ▼ +Edit +Bench +$/);
+assert.ok(selectedRow(f120).startsWith("▶ Claude Opus 5.5 ●"), f120.join("\n"));
+assert.ok(f120[17].includes("anthropic/claude-opus-5-5 · benchmarked → keep replace"), f120[17]);
+assert.ok(f120.at(-2).includes("Enter swap · Ctrl+S sort · Ctrl+B bench · Ctrl+U unpin · Ctrl+O mode · Tab tabs · Esc close"));
+// Frequent default sort: Uses ▼ (GPT-6 Astra 432 first), plain counts with gold-star favourite.
+assert.ok(f120[7].includes("GPT-6 Astra") && /  432  /.test(f120[7]), f120[7]);
+assert.ok(f120.some((l) => l.includes("Gemini 4 Argon") && l.includes("★ 223") && l.includes("✓ faster")));
+assert.ok(f120.some((l) => l.includes("Claude Opus 5.5") && l.includes("✓ keep replace") && l.includes("○ replace")));
 
-// Enter swaps Claude Opus 5.5 -> `● hashline *` and shows big dot ` ●`!
-picker.handleInput("\r");
-frame110 = picker.render(110, plainTheme).join("\n");
-assert.ok(frame110.includes("▶ Claude Opus 5.5 ●"), frame110);
-assert.ok(frame110.includes("● hashline *"), frame110);
+// 0-jitter: header and cell x-offsets identical across scrolling, Enter pin toggles, Ctrl+B and every Ctrl+S mode.
+for (const w of [120, 90]) {
+	const base = geometry(w);
+	const seen = new Set();
+	for (let i = 0; i < 16; i++) {
+		picker.handleInput(KEY.down);
+		seen.add(selectedRow(render(w)));
+		assert.equal(geometry(w), base, `scroll jitter at ${w}`);
+	}
+	assert.ok(seen.size >= 15, "scrolled through every Frequent row");
+	for (const k of [KEY.enter, KEY.enter, KEY.ctrlU, KEY.ctrlB, KEY.ctrlB]) {
+		picker.handleInput(k);
+		assert.equal(geometry(w), base, `jitter after key ${JSON.stringify(k)} at ${w}`);
+	}
+	for (let i = 0; i < 6; i++) {
+		picker.handleInput(KEY.ctrlS);
+		assert.equal(geometry(w), base, `sort jitter at ${w} step ${i}`);
+	}
+	assert.equal(picker.sortMode, "default");
+}
 
-// Ctrl+U unpins Claude Opus 5.5 back to `○ replace`
-picker.handleInput("\x15"); // Ctrl+U
-frame110 = picker.render(110, plainTheme).join("\n");
-assert.ok(!frame110.includes("● hashline *"), frame110);
+// Enter pins the current selection with gold `*`; Ctrl+U unpins; Ctrl+B shows a fixed-width running cell.
+for (let i = 0; i < 20 && !selectedRow(render(120)).includes("Claude Opus 5.5"); i++) picker.handleInput(KEY.down);
+picker.handleInput(KEY.enter);
+f120 = render(120);
+assert.ok(selectedRow(f120).includes("Claude Opus 5.5 ●") && selectedRow(f120).includes("* ● hashline"), f120.join("\n"));
+assert.ok(f120[17].includes("pinned → hashline"), f120[17]);
+picker.handleInput(KEY.ctrlU);
+assert.ok(!selectedRow(render(120)).includes("* "), "unpinned");
+picker.handleInput(KEY.ctrlB);
+assert.ok(selectedRow(render(120)).includes("⟳ running…"));
+picker.handleInput(KEY.ctrlB);
 
-// Ctrl+B starts live benchmark (`⟳ benching 5s…`) without closing menu
-picker.handleInput("\x02"); // Ctrl+B
-frame110 = picker.render(110, plainTheme).join("\n");
-assert.ok(frame110.includes("⟳ benching 5s…"), frame110);
+// Ctrl+S cycles sort modes, highlights the active header, and keeps the selection anchored on fullId.
+const anchor = selectedRow(render(120)).slice(0, 20);
+const modes = [];
+for (let i = 0; i < 6; i++) {
+	picker.handleInput(KEY.ctrlS);
+	modes.push(picker.sortMode);
+	const f = render(120);
+	assert.equal(selectedRow(f).slice(0, 20), anchor, `selection lost after Ctrl+S -> ${picker.sortMode}`);
+	const hdr = render(120, markTheme)[HEADER_ROW];
+	const expectHdr = { uses: "Uses ▼", edit: "Edit ▲", bench: "Bench ▲", model: "Model ▲", provider: "Provider ▲", default: "Uses ▼" }[picker.sortMode];
+	assert.ok(hdr.includes(`\x1b[1m\x1b[36m${expectHdr}\x1b[39m\x1b[22m`), `active header for ${picker.sortMode}: ${hdr}`);
+	assert.equal((hdr.match(/[▲▼]/g) ?? []).length, 1, hdr);
+	const rows = f.slice(...ROWS).filter((l) => l.trim());
+	if (picker.sortMode === "bench") {
+		const rank = (l) => ["✓ faster", "✓ keep replace", "✗ error", "untested"].findIndex((s) => l.includes(s));
+		assert.ok(rows.every((l, j) => j === 0 || rank(rows[j - 1]) <= rank(l)), rows.join("\n"));
+	}
+	if (picker.sortMode === "edit") {
+		const hl = rows.map((l) => /[●○] hashline/.test(l));
+		assert.ok(hl.every((v, j) => j === 0 || hl[j - 1] >= v), rows.join("\n"));
+	}
+}
+assert.deepEqual(modes, ["uses", "edit", "bench", "model", "provider", "default"]);
 
-// Printable keys ("b", "s") go into Search input instead of triggering hotkeys!
-picker.handleInput("a");
-picker.handleInput("r");
-picker.handleInput("g");
-frame110 = picker.render(110, plainTheme).join("\n");
-assert.ok(frame110.includes("▶ Gemini 4 Argon ●"), frame110);
+// Search query: fuzzy rank governs, all headers dim without arrows; clearing restores the arrow.
+for (const ch of "arg") picker.handleInput(ch);
+f120 = render(120);
+assert.ok(selectedRow(f120).startsWith("▶ Gemini 4 Argon ●"), f120.join("\n"));
+assert.ok(!/[▲▼]/.test(f120[HEADER_ROW]) && f120[HEADER_ROW].includes("Uses"), f120[HEADER_ROW]);
+assert.ok(!render(120, markTheme)[HEADER_ROW].includes("\x1b[1m"));
+for (let i = 0; i < 3; i++) picker.handleInput(KEY.bksp);
+assert.ok(render(120)[HEADER_ROW].includes("Uses ▼"));
+
+// Ctrl+O cycles the global mode; Ctrl+G (Zellij unlock) is ignored and never reaches Search.
+const modeOf = (f) => /mode: (\w+)/.exec(f[1])[1];
+picker.handleInput(KEY.ctrlO);
+assert.equal(modeOf(render(120)), "all");
+picker.handleInput(KEY.ctrlG);
+f120 = render(120);
+assert.equal(modeOf(f120), "all");
+assert.equal(f120[5], emptySearchLine, "Ctrl+G must not reach Search");
+picker.handleInput(KEY.ctrlO);
+picker.handleInput(KEY.ctrlO);
+f120 = render(120);
+assert.equal(modeOf(f120), "off");
+assert.ok(f120.slice(...ROWS).filter((l) => l.trim()).every((l) => l.includes("○ off") && !/[●○] hashline/.test(l)));
+picker.handleInput(KEY.ctrlO);
+assert.equal(modeOf(render(120)), "auto");
+
+// Widths 42/68/90/120 on every tab: header and cells drop in lockstep (uses -> bench -> edit).
+for (let t = 0; t < 8; t++) {
+	for (const w of [42, 68, 90, 120]) {
+		const f = render(w);
+		const hdr = f[HEADER_ROW];
+		const rows = f.slice(...ROWS).filter((l) => l.trim() && !l.includes("No "));
+		assert.equal(hdr.includes("Bench"), rows.some((l) => BENCH_RE.test(l)), `bench lockstep tab ${t} w ${w}`);
+		assert.equal(hdr.includes("Edit"), rows.some((l) => /[●○] (?:hashline|replace|off)/.test(l)) || !rows.length, `edit lockstep tab ${t} w ${w}`);
+		if (w === 42) assert.ok(hdr.includes("Edit") && !hdr.includes("Uses") && !hdr.includes("Bench"), hdr);
+		if (w >= 90) assert.ok(hdr.includes("Uses") && hdr.includes("Bench"), hdr);
+	}
+	picker.handleInput(KEY.tab);
+}
+
+// Single-provider tab (Zeta Lab): no Provider column, Ctrl+S skips 'provider'.
+for (let i = 0; i < 7; i++) picker.handleInput(KEY.tab);
+const zeta = render(120);
+assert.ok(zeta[3].includes("Zeta Lab"));
+assert.ok(!zeta[HEADER_ROW].includes("Provider") && !zeta.slice(...ROWS).some((l) => l.includes("[")), zeta.join("\n"));
+assert.ok(zeta.some((l) => l.includes("Zeta A") && l.includes("✗ error")), zeta.join("\n"));
+const zetaBase = geometry(120).replace(/"Provider":-1/, "");
+const zetaModes = [];
+for (let i = 0; i < 5; i++) {
+	picker.handleInput(KEY.ctrlS);
+	zetaModes.push(picker.sortMode);
+	assert.equal(geometry(120).replace(/"Provider":-1/, ""), zetaBase);
+}
+assert.deepEqual(zetaModes, ["uses", "edit", "bench", "model", "default"]);
+
+// Honest provenance only: no multipliers or `×` suffixes anywhere; plain counts and verdicts present.
+const everything = allFrames.flat().join("\n");
+for (const bad of ["2.00x", "0.95x", "5.1x", "×", "x↓"]) assert.ok(!everything.includes(bad), `rendered "${bad}"`);
+for (const good of ["432", "★ 223", "✓ faster", "✓ keep replace", "✗ error", "untested", "rule (openai-codex) → hashline"]) {
+	assert.ok(everything.includes(good), `missing "${good}"`);
+}
+assert.equal(new Set(allFrames.filter((f) => f.length > 2).map((f) => f.length)).size, 1, "picker height constant");
+assert.ok(render(22).every((l) => visibleWidth(l) <= 22));
 
 // Esc closes cleanly
 picker.handleInput("\x1b");

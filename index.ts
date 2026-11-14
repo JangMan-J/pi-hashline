@@ -493,7 +493,7 @@ export default function piHashlineExtension(pi: ExtensionAPI): void {
 	};
 
 	pi.registerCommand("hashline", {
-		description: "Open the Hashline edit routing & benchmark picker (Enter swap, Ctrl+B benchmark, Tab facets)",
+		description: "Open the Hashline edit routing & benchmark picker (Enter swap, Ctrl+S sort, Ctrl+B bench, Ctrl+O mode, Tab facets)",
 		handler: async (_args, ctx) => {
 			await openMenu(ctx);
 		},
