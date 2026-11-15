@@ -3,17 +3,18 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createRequire } from "node:module";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 // Prefer the repo-local install (what `npm ci` provides in CI); fall back to a local
 // pi-fork install when browsing the tree without installing dependencies.
 let createJiti, piEntry, tuiEntry, typeboxEntry;
 try {
-	const localRequire = createRequire(import.meta.url);
+	// ESM resolution: @earendil-works/pi-coding-agent exports only an `import` condition,
+	// so require.resolve() fails on it.
 	createJiti = (await import("jiti")).createJiti;
-	piEntry = localRequire.resolve("@earendil-works/pi-coding-agent");
-	tuiEntry = localRequire.resolve("@earendil-works/pi-tui");
-	typeboxEntry = localRequire.resolve("typebox");
+	piEntry = fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent"));
+	tuiEntry = fileURLToPath(import.meta.resolve("@earendil-works/pi-tui"));
+	typeboxEntry = fileURLToPath(import.meta.resolve("typebox"));
 } catch {
 	const piPkgRoot = path.join(os.homedir(), ".local/share/pi-fork/current/node_modules/@earendil-works/pi-coding-agent");
 	const piReq = createRequire(path.join(piPkgRoot, "package.json"));

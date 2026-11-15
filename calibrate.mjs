@@ -388,10 +388,11 @@ async function getBenchEnv() {
 			// Prefer a repo-local / peer-installed Pi; fall back to a local pi-fork install.
 			let pca, createJiti, piEntry, tuiEntry, typeboxEntry;
 			try {
-				const localRequire = createRequire(import.meta.url);
-				piEntry = localRequire.resolve("@earendil-works/pi-coding-agent");
-				tuiEntry = localRequire.resolve("@earendil-works/pi-tui");
-				typeboxEntry = localRequire.resolve("typebox");
+				// ESM resolution: @earendil-works/pi-coding-agent exports only an `import`
+				// condition, so require.resolve() fails on it.
+				piEntry = fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent"));
+				tuiEntry = fileURLToPath(import.meta.resolve("@earendil-works/pi-tui"));
+				typeboxEntry = fileURLToPath(import.meta.resolve("typebox"));
 				createJiti = (await import("jiti")).createJiti;
 				pca = await import(pathToFileURL(piEntry).href);
 			} catch {
