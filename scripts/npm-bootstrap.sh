@@ -49,7 +49,7 @@ done
 # Resuming inside the cleanup steps means running them.
 [ "$FROM" -ge 4 ] && CLEANUP=1
 WORKFLOW=publish.yml
-BOOT_VERSION=0.0.0-bootstrap
+BOOT_VERSION=0.0.0-rebootstrap
 PLACEHOLDER=0.0.0-stage
 
 cd "$(dirname "$0")/.."
