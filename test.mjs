@@ -526,6 +526,13 @@ assert.ok(bar(render(300)).endsWith("  1,137 edits replayed so far; figures sett
 	assert.equal(frameMod.spread("left", "right", 20, cells), "left         right");
 	assert.equal(frameMod.spread("left", "right", 12, cells), undefined);
 	assert.deepEqual([100, 128, 129, 200, 300].map((w) => frameMod.contentWidth(w, 28)), [100, 128, 128, 128, 164]);
+	// frame.ts is one file kept as an identical copy in each tool of the suite. Where a sibling checkout sits beside
+	// this one (a development machine, not CI), the copies must match.
+	const mine = fs.readFileSync(path.join(import.meta.dirname, "frame.ts"), "utf8");
+	for (const rel of ["../pi-picks/frame.ts", "../pi-speech/src/pi/frame.ts"]) {
+		const sibling = path.join(import.meta.dirname, rel);
+		if (fs.existsSync(sibling)) assert.equal(fs.readFileSync(sibling, "utf8"), mine, `frame.ts differs from ${rel}: copy the newer file over the older`);
+	}
 }
 
 // A wide screen: only the rules and the title line run the full width; the title badge, tabs, rows, status line and key bar stop where the Edit column ends.
