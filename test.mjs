@@ -295,7 +295,7 @@ assert.ok(fs.readFileSync(path.join(tmp, "src/moved_dest.py"), "utf8").includes(
 const pickerMod = await jiti.import(path.join(import.meta.dirname, "picker.ts"));
 const tuiMod = await jiti.import(tuiEntry);
 const { HashlinePickerComponent, HashlineDetailPane } = pickerMod;
-const { visibleWidth } = tuiMod;
+const { visibleWidth, truncateToWidth } = tuiMod;
 
 // config.ts also accepts "built-in" in hand-edited JSON rules
 assert.equal(
@@ -396,9 +396,13 @@ const picker = new HashlinePickerComponent({
 });
 
 const KEY = { enter: "\r", down: "\x1b[B", tab: "\t", shiftTab: "\x1b[Z", ctrlB: "\x02", ctrlD: "\x04", ctrlR: "\x12", ctrlX: "\x18", ctrlS: "\x13", ctrlG: "\x07", bksp: "\x7f" };
-const HEADER_ROW = 6;
-const ROWS = [7, 17];
-const STATUS_ROW = 17;
+// The frame's lines: title rule, tabs, rule, search, column headers, ten rows, status, rule, keys, rule.
+const TITLE_ROW = 0;
+const TABS_ROW = 1;
+const SEARCH_ROW = 3;
+const HEADER_ROW = 4;
+const ROWS = [5, 15];
+const STATUS_ROW = 15;
 const KEYS = "  Enter swap · Ctrl+D detail · Ctrl+R reset · Ctrl+S sort · Tab · Esc";
 /** The key bar: hints on the left, the selected model's notes right-aligned two columns in from the edge. */
 const bar = (f) => f.at(-2);
@@ -463,16 +467,18 @@ function geometry(w) {
 
 // Initial frame: Frequent tab, the active model selected, key hints only on the bottom bar.
 let f120 = render(120);
-const emptySearchLine = f120[5];
+const emptySearchLine = f120[SEARCH_ROW];
 assert.ok(emptySearchLine.startsWith("  Search: "));
-assert.ok(f120[3].includes("Frequent") && f120[3].includes("All") && !f120[3].includes("Benchmarked"), f120[3]);
+assert.ok(f120[TABS_ROW].includes("Frequent") && f120[TABS_ROW].includes("All") && !f120[TABS_ROW].includes("Benchmarked"), f120[TABS_ROW]);
 assert.ok(selectedRow(f120).startsWith("▶ Claude Opus 5.5 ●"), f120.join("\n"));
 assert.equal(f120[STATUS_ROW].trimEnd(), "  (2/15) anthropic/claude-opus-5-5");
 assert.ok(bar(f120).startsWith(`${KEYS}  `) && bar(f120).endsWith("  rule (anthropic) → built-in"), bar(f120));
 assert.equal(visibleWidth(bar(f120)), 118, "notes end two columns before the right edge");
 assert.ok(bar(render(60)).startsWith(KEYS.slice(0, 50)) && !bar(render(60)).includes("→"), "a narrow key bar holds keys only");
 assert.ok(render(60)[STATUS_ROW].includes("rule (anthropic)"), "notes that do not fit beside the keys stay on the status line");
-assert.ok(f120[1].trimEnd().endsWith("2 replayed"), f120[1]);
+assert.equal(f120.length, 19);
+assert.ok(f120[TITLE_ROW].startsWith("─ Hashline Edit Routing ───") && f120[TITLE_ROW].endsWith("─── 2 replayed ─"), f120[TITLE_ROW]);
+assert.equal(visibleWidth(f120[TITLE_ROW]), 120, "the title line is the top rule");
 
 // Every column header is accent-coloured, even when unsorted.
 const styledHdrInitial = render(120, markTheme)[HEADER_ROW];
@@ -503,16 +509,36 @@ for (let i = 0; i < 20 && !selectedRow(render(120)).includes("Claude Opus 5.5");
 assert.ok(render(120)[STATUS_ROW].endsWith("anthropic/claude-opus-5-5 · 1,137 edits replayed so far; figures settle as you work") && bar(render(120)).endsWith("  rule (anthropic) → built-in"), render(120)[STATUS_ROW]);
 assert.ok(bar(render(130)).endsWith("  1,137 edits replayed so far; figures settle as you work") && render(130)[STATUS_ROW].endsWith("anthropic/claude-opus-5-5 · rule (anthropic) → built-in"), bar(render(130)));
 assert.ok(bar(render(300)).endsWith("  1,137 edits replayed so far; figures settle as you work · rule (anthropic) → built-in") && render(300)[STATUS_ROW].endsWith("anthropic/claude-opus-5-5"), bar(render(300)));
-// A wide screen: only the rules run the full width; the title badge, tabs, rows, status line and key bar stop where the Edit column ends.
+// The shared frame on its own: plain text in, the same line order and height whatever a tool gives it.
+{
+	const frameMod = await jiti.import(path.join(import.meta.dirname, "frame.ts"));
+	const plain = { accent: (t) => t, bold: (t) => t, border: (t) => t };
+	const cells = { width: visibleWidth, truncate: (t, w) => truncateToWidth(t, w) };
+	const parts = { title: "Title", badge: "busy", tabs: "  A │ B", input: "  Search: ", header: "  Name", rows: ["▶ one", "  two"], status: "  (1/2) one", keys: "  Enter · Esc" };
+	const at = (w, term = w, p = parts) => frameMod.frameLines(p, w, term, plain, cells);
+	assert.equal(at(60).length, 9 + frameMod.FRAME_ROWS);
+	assert.equal(at(60)[0], `─ Title ${"─".repeat(45)} busy ─`);
+	assert.equal(at(60, 60, { ...parts, badge: undefined })[0], `─ Title ${"─".repeat(52)}`);
+	assert.equal(at(16)[0], `─ Title ${"─".repeat(8)}`, "a badge that leaves no rule beside the title is dropped");
+	assert.equal(at(128, 200)[0], `─ Title ${"─".repeat(113)} busy ${"─".repeat(73)}`, "past the badge the rule runs to the terminal's edge");
+	assert.deepEqual(at(128, 200).map((l) => visibleWidth(l) > 128), [true, false, true, ...Array(13).fill(false), true, false, true]);
+	assert.deepEqual(at(60, 60, { ...parts, rows: Array(14).fill("  row") }).slice(5, 15), Array(10).fill("  row"), "never more than FRAME_ROWS rows");
+	assert.equal(frameMod.spread("left", "right", 20, cells), "left         right");
+	assert.equal(frameMod.spread("left", "right", 12, cells), undefined);
+	assert.deepEqual([100, 128, 129, 200, 300].map((w) => frameMod.contentWidth(w, 28)), [100, 128, 128, 128, 164]);
+}
+
+// A wide screen: only the rules and the title line run the full width; the title badge, tabs, rows, status line and key bar stop where the Edit column ends.
 const wide = render(252);
 const wideEnd = editEndAt(252);
 assert.equal(wideEnd, 140);
 for (const [i, ln] of wide.entries()) {
-	if (/^─+$/.test(ln)) assert.equal(visibleWidth(ln), 252, `rule ${i} spans the terminal`);
+	if (/^─+$/.test(ln) || i === TITLE_ROW) assert.equal(visibleWidth(ln), 252, `rule ${i} spans the terminal`);
 	else assert.ok(visibleWidth(ln.trimEnd()) <= wideEnd, `line ${i} runs past column ${wideEnd}: "${ln}"`);
 }
-assert.equal(wide.filter((ln) => /^─+$/.test(ln)).length, 5);
-assert.equal(visibleWidth(wide[1].trimEnd()), wideEnd - 2, wide[1]);
+assert.equal(wide.filter((ln) => /^─+$/.test(ln)).length, 3);
+assert.equal(visibleWidth(wide[TITLE_ROW].slice(0, wide[TITLE_ROW].indexOf("replayed") + "replayed".length)), wideEnd - 2, wide[TITLE_ROW]);
+assert.ok(/replayed ─+$/.test(wide[TITLE_ROW]), "the rule runs on past the badge to the terminal's edge");
 assert.equal(visibleWidth(bar(wide)), wideEnd - 2, bar(wide));
 assert.equal(picker.paneOffsetX(52), Math.floor((wideEnd - 52) / 2), "the detail pane is centred over the text, not the terminal");
 render(120);
@@ -629,12 +655,12 @@ assert.equal(picker.sortMode, "model-asc");
 picker.handleInput(KEY.ctrlS);
 assert.equal(picker.sortMode, "model-desc");
 for (let i = 0; i < TAB_COUNT - 1; i++) picker.handleInput(KEY.tab); // back to Frequent
-assert.ok(render(120)[3].includes("Frequent"));
+assert.ok(render(120)[TABS_ROW].includes("Frequent"));
 sortUntil("default");
 
 // Ctrl+G (Zellij unlock) is ignored and never reaches Search.
 picker.handleInput(KEY.ctrlG);
-assert.equal(render(120)[5], emptySearchLine, "Ctrl+G must not reach Search");
+assert.equal(render(120)[SEARCH_ROW], emptySearchLine, "Ctrl+G must not reach Search");
 
 // Widths 42/68/92/120 on every tab: header and cells drop in lockstep (Cost first; Edit always stays).
 for (let t = 0; t < TAB_COUNT; t++) {
@@ -652,7 +678,7 @@ for (let t = 0; t < TAB_COUNT; t++) {
 // Single-provider tab (Zeta Lab): no Provider column, and Ctrl+S skips it.
 for (let i = 0; i < TAB_COUNT - 1; i++) picker.handleInput(KEY.tab);
 const zeta = render(120);
-assert.ok(zeta[3].includes("Zeta Lab"));
+assert.ok(zeta[TABS_ROW].includes("Zeta Lab"));
 assert.ok(!zeta[HEADER_ROW].includes("Provider") && !zeta.slice(...ROWS).some((l) => l.includes("[")), zeta.join("\n"));
 const zetaBase = geometry(120);
 const zetaModes = [];
@@ -686,7 +712,7 @@ sortUntil("default");
 picker.handleInput(KEY.tab); // All
 picker.handleInput(KEY.tab); // Anthropic
 const anthDefault = render(120);
-assert.ok(anthDefault[3].includes("Anthropic"));
+assert.ok(anthDefault[TABS_ROW].includes("Anthropic"));
 assert.equal(picker.sortMode, "default");
 assert.ok(!/[▲▼]/.test(anthDefault[HEADER_ROW]), `expected no arrow when the active model is first: ${anthDefault[HEADER_ROW]}`);
 const anthRowsDefault = anthDefault.slice(...ROWS).filter((l) => l.trim());
@@ -720,7 +746,7 @@ picker.syncState({
 	),
 });
 picker.handleInput(KEY.shiftTab); // Anthropic -> All
-assert.ok(render(120)[3].includes("All"));
+assert.ok(render(120)[TABS_ROW].includes("All"));
 const colored = render(200, ansiTheme);
 const rowOf = (frame, name) => frame.find((l) => l.includes(name)) ?? "";
 assert.ok(rowOf(colored, "Gemini 4 Argon").includes("\x1b[32m+6.3%") && rowOf(colored, "Gemini 4 Argon").includes("\x1b[32m-1.2%"), rowOf(colored, "Gemini 4 Argon"));

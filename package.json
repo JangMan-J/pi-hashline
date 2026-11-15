@@ -17,6 +17,7 @@
     "index.ts",
     "config.ts",
     "picker.ts",
+    "frame.ts",
     "replay.ts",
     "README.md",
     "LICENSE"

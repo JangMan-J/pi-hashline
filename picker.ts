@@ -11,6 +11,7 @@ import type { Api, Model } from "@earendil-works/pi-ai";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { fuzzyFilter, Input, Key, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { type FrameStyle, type Measure, FRAME_ROWS, contentWidth as frameContentWidth, frameLines, spread } from "./frame.ts";
 import { type EditChoice, type HashlineConfig, loadConfigSync, resolveModelDecision, saveConfigSync } from "./config.ts";
 import { type ReplayRow, type ReplayTable, loadReplayTable, replaySessions, saveReplayTable } from "./replay.ts";
 
@@ -61,20 +62,13 @@ const SPEED_MIN_W = Math.max(visibleWidth("Speed ▼"), visibleWidth("+99.9%"));
 const COST_MIN_W = Math.max(visibleWidth("Cost ▼"), visibleWidth("+99.9%"));
 /** Every possible Edit cell fits this fixed width, so toggling never shifts columns. */
 const EDIT_W = Math.max(visibleWidth("● hashline"), visibleWidth("○ built-in"), visibleWidth("Edit ▲"));
-/** Widest terminal the picker fills edge to edge. */
-const WINDOW_W = 128;
 /** Speed, Cost and Edit at their usual widths, two columns apart. */
 const RIGHT_COLS_W = SPEED_MIN_W + 2 + COST_MIN_W + 2 + EDIT_W;
+const measure: Measure = { width: visibleWidth, truncate: (text, width) => truncateToWidth(text, width) };
 
-/**
- * How many columns the picker's text uses in a terminal this wide. A window is filled edge to edge. A wider
- * screen would put its whole width between a name and its figures, so there the text stops at WINDOW_W until
- * the terminal's midline passes the Speed, Cost and Edit columns, and from then on those stay centred on it.
- * Only the rules run the full width.
- */
+/** How many columns the picker's text uses in a terminal this wide: on a wide screen, Speed, Cost and Edit sit on its midline. */
 export function contentWidth(termWidth: number): number {
-	if (termWidth <= WINDOW_W) return termWidth;
-	return Math.max(WINDOW_W, Math.ceil((termWidth + RIGHT_COLS_W) / 2));
+	return frameContentWidth(termWidth, RIGHT_COLS_W);
 }
 const BOTTOM_KEYS = "  Enter swap · Ctrl+D detail · Ctrl+R reset · Ctrl+S sort · Tab · Esc";
 interface Layout {
@@ -820,38 +814,24 @@ export class HashlinePickerComponent {
 			this.applyFilter();
 		}
 
-		const headerTitle = "  Hashline Edit Routing";
 		const replayCount = this.replayRows.size;
 		const scanning = this.opts.replayStatus?.();
-		const statusBadge = `${[replayCount > 0 ? `${replayCount} replayed` : "", scanning ?? ""].filter(Boolean).join(" · ")}  `;
-		const headerGap = Math.max(1, width - visibleWidth(headerTitle) - visibleWidth(statusBadge));
-		const headerLine =
-			visibleWidth(headerTitle) + visibleWidth(statusBadge) + 1 <= width
-				? theme.fg("accent", theme.bold(headerTitle)) +
-					" ".repeat(headerGap) +
-					theme.fg(scanning ? "warning" : "muted", statusBadge)
-				: truncateToWidth(theme.fg("accent", theme.bold(headerTitle)), width);
-
-		const lines: string[] = [
-			theme.fg("accent", "─".repeat(termWidth)),
-			headerLine,
-			theme.fg("border", "─".repeat(termWidth)),
-			this.renderTabs(width, theme),
-			theme.fg("border", "─".repeat(termWidth)),
-		];
+		const badgeText = [replayCount > 0 ? `${replayCount} replayed` : "", scanning ?? ""].filter(Boolean).join(" · ");
+		const badge = badgeText ? theme.fg(scanning ? "warning" : "muted", badgeText) : undefined;
+		const tabs = this.renderTabs(width, theme);
 
 		// Search input
 		const promptText = "  Search: ";
 		const promptW = visibleWidth(promptText);
 		const inputLines = this.searchInput.render(Math.max(0, width - promptW));
-		lines.push(theme.fg("muted", promptText) + (inputLines[0] ?? ""));
+		const input = theme.fg("muted", promptText) + (inputLines[0] ?? "");
 
-		// Column header row (replaces the old blank spacer, so picker height is unchanged)
 		const L = this.layout(width);
-		lines.push(this.renderHeader(L, theme));
+		const header = this.renderHeader(L, theme);
 
 		// Model rows
-		const MAX_VISIBLE = 10;
+		const MAX_VISIBLE = FRAME_ROWS;
+		const lines: string[] = [];
 		const half = Math.floor(MAX_VISIBLE / 2);
 		const rows = this.filteredRows;
 		const hasQuery = this.searchInput.getValue().trim() !== "";
@@ -879,9 +859,7 @@ export class HashlinePickerComponent {
 			}
 		}
 
-		for (let i = Math.max(1, visible.length); i < MAX_VISIBLE; i++) lines.push("");
-
-		// Status/provenance line (1 fixed line so height never jumps)
+		// One line about the selected model.
 		const position = rows.length ? this.rowIndex + 1 : 0;
 		const selected = rows[this.rowIndex];
 		let detailLine = `  (${position}/${rows.length})`;
@@ -902,40 +880,30 @@ export class HashlinePickerComponent {
 		const basis = this.editBasis();
 		const legendGood = basis === "speed" ? "faster tool" : "cheaper tool";
 		const legendOther = basis === "speed" ? "slower tool" : "costlier tool";
-		const legend = basis ? `  ● ${legendGood}  ● ${legendOther}` : "";
-		const detailGap = width - visibleWidth(detailLine) - visibleWidth(legend);
-		if (basis && detailGap >= 2) {
-			lines.push(
-				theme.fg("dim", detailLine) +
-					" ".repeat(detailGap) +
-					theme.fg("success", "  ●") +
-					theme.fg("dim", ` ${legendGood}  `) +
-					theme.fg("error", "●") +
-					theme.fg("dim", ` ${legendOther}`),
-			);
-		} else {
-			lines.push(theme.fg("dim", truncateToWidth(detailLine, width)));
-		}
+		const legend = basis
+			? theme.fg("success", "●") + theme.fg("dim", ` ${legendGood}  `) + theme.fg("error", "●") + theme.fg("dim", ` ${legendOther}`)
+			: "";
+		const status =
+			(legend && spread(theme.fg("dim", detailLine), legend, width, measure)) || theme.fg("dim", truncateToWidth(detailLine, width));
 
-		// Help bar
-		lines.push(theme.fg("border", "─".repeat(termWidth)));
-		lines.push(this.renderBottomBar(width, theme, barNotes));
-		lines.push(theme.fg("accent", "─".repeat(termWidth)));
-
-		return lines.map((l) => truncateToWidth(l, termWidth));
+		const style: FrameStyle = {
+			accent: (text) => theme.fg("accent", text),
+			bold: (text) => theme.bold(text),
+			border: (text) => theme.fg("border", text),
+		};
+		const keys = this.renderBottomBar(width, theme, barNotes);
+		return frameLines({ title: "Hashline Edit Routing", badge, tabs, input, header, rows: lines, status, keys }, width, termWidth, style, measure);
 	}
 
 	/** Whether these notes fit on the key bar with two columns between them and the keys and two before the right edge. */
 	private fitsBottomBar(notes: string[], width: number): boolean {
-		return visibleWidth(BOTTOM_KEYS) + 2 + visibleWidth(notes.join(" · ")) + 2 <= width;
+		return spread(BOTTOM_KEYS, notes.join(" · "), width, measure) !== undefined;
 	}
 
 	/** Key hints on the left; the selected model's notes on the right when they fit. */
 	private renderBottomBar(width: number, theme: any, notes: string[]): string {
-		if (!notes.length) return theme.fg("dim", truncateToWidth(BOTTOM_KEYS, width, "…"));
-		const note = notes.join(" · ");
-		const gap = width - visibleWidth(BOTTOM_KEYS) - visibleWidth(note) - 2;
-		return theme.fg("dim", `${BOTTOM_KEYS}${" ".repeat(gap)}${note}`);
+		const line = notes.length ? spread(BOTTOM_KEYS, notes.join(" · "), width, measure) : undefined;
+		return theme.fg("dim", line ?? truncateToWidth(BOTTOM_KEYS, width, "…"));
 	}
 
 	/** Replayed time saving as a signed percentage, or empty when the model has no replayable edits. */
@@ -1113,7 +1081,7 @@ export interface OpenHashlineMenuOptions {
 }
 
 const DETAIL_PANE_WIDTH = 52;
-/** Rows between the bottom of the terminal and the last list row: Pi's footer (about 2), then the picker's rule, key bar, rule and status line. */
+/** Rows between the bottom of the terminal and the last list row: Pi's footer (about 2), then the frame's rule, key bar, rule and status line. */
 const DETAIL_PANE_LIFT = 6;
 const detailPaneOptions = (offsetX: number | undefined) =>
 	offsetX === undefined
