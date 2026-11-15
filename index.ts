@@ -182,6 +182,19 @@ function appendStatsRow(row: Record<string, unknown>): void {
 	} catch {}
 }
 
+/** Replace `edit` with `hashline_edit` (placed after `read`, else last) or the reverse; every other tool keeps its place. */
+export function swapEditTool(tools: readonly string[], useHashline: boolean): string[] {
+	const [drop, add] = useHashline ? ["edit", "hashline_edit"] : ["hashline_edit", "edit"];
+	if (useHashline ? tools.includes(add) && !tools.includes(drop) : !tools.includes(drop)) return [...tools];
+	const out = tools.filter(t => t !== drop);
+	if (!out.includes(add)) {
+		const readIdx = useHashline ? out.indexOf("read") : -1;
+		if (readIdx >= 0) out.splice(readIdx + 1, 0, add);
+		else out.push(add);
+	}
+	return out;
+}
+
 export default function piHashlineExtension(pi: ExtensionAPI): void {
 	let storeInstance: InstanceType<OmpNatives["EditStore"]> | undefined;
 	let lastSessionFile: string | undefined;
@@ -205,23 +218,13 @@ export default function piHashlineExtension(pi: ExtensionAPI): void {
 
 	pi.on("before_agent_start", (event, ctx) => {
 		activeThisRun = shouldUseHashline(ctx.model);
-		const opts = event.systemPromptOptions;
-		if (!opts?.selectedTools) return undefined;
-		const hasEdit = opts.selectedTools.includes("edit");
-		const hasHl = opts.selectedTools.includes("hashline_edit");
-		if (activeThisRun) {
-			if (hasEdit || !hasHl) {
-				opts.selectedTools = opts.selectedTools.filter((t: string) => t !== "edit");
-				if (!opts.selectedTools.includes("hashline_edit")) {
-					const readIdx = opts.selectedTools.indexOf("read");
-					if (readIdx >= 0) opts.selectedTools.splice(readIdx + 1, 0, "hashline_edit");
-					else opts.selectedTools.push("hashline_edit");
-				}
-			}
-		} else if (hasHl) {
-			opts.selectedTools = opts.selectedTools.filter((t: string) => t !== "hashline_edit");
-			if (!opts.selectedTools.includes("edit")) opts.selectedTools.push("edit");
-		}
+		// Swap through the live loadout, never by assigning event.systemPromptOptions.selectedTools: that list is
+		// the snapshot from Pi's last prompt rebuild, and an explicit edit to it replaces the live loadout for the
+		// run (AgentSession._prepareRun), dropping any tool activated after the snapshot (late MCP/extension tools).
+		// Leaving it untouched makes Pi use getActiveTools() as of now, which setActiveTools() below updates.
+		const current = pi.getActiveTools();
+		const next = swapEditTool(current, activeThisRun);
+		if (next.length !== current.length || next.some((t, i) => t !== current[i])) pi.setActiveTools(next);
 		return undefined;
 	});
 

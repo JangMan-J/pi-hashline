@@ -136,6 +136,10 @@ cfgMod.saveConfigSync(
 
 const handlers = new Map();
 const tools = new Map();
+// Mirror Pi's AgentSession tool state (dist/core/agent-session.js): `active` is the live loadout,
+// `base` the selectedTools snapshot taken at the last setActiveTools()/rebuild. A tool an extension or MCP
+// server activates late lands in `active` without refreshing `base`.
+const live = { active: ["read", "bash", "edit", "write"], base: ["read", "bash", "edit", "write"] };
 ext({
 	on(event, fn) {
 		const list = handlers.get(event) ?? [];
@@ -147,44 +151,44 @@ ext({
 	},
 	registerCommand() {},
 	registerShortcut() {},
+	getActiveTools: () => [...live.active],
+	setActiveTools(names) {
+		live.active = [...new Set(names)];
+		live.base = [...live.active];
+	},
 });
+// Pi's _prepareRun: handlers see a copy of the base snapshot; an explicit edit wins, otherwise the live loadout is used.
+async function prepareRun(model) {
+	const before = live.base;
+	const opts = { selectedTools: [...before] };
+	for (const fn of handlers.get("before_agent_start")) {
+		await fn({ messageType: "user", prompt: "refactor", systemPromptOptions: opts }, { cwd: tmp, model });
+	}
+	const edited = opts.selectedTools.length !== before.length || opts.selectedTools.some((n, i) => n !== before[i]);
+	return edited ? opts.selectedTools : [...live.active];
+}
 
 const hlTool = tools.get("hashline_edit");
 assert.ok(hlTool, "hashline_edit registered");
 
+const gemini = { provider: "google", id: "gemini-4-argon" };
+const carbon = { provider: "antigravity", id: "gemini-4-carbon" };
+const claude = { provider: "anthropic", id: "claude-opus-5-5" };
+
 // A model the user has not switched keeps Pi's stock tools untouched.
-const stockOpts = { selectedTools: ["read", "bash", "edit", "write"] };
-for (const fn of handlers.get("before_agent_start")) {
-	await fn({ messageType: "user", prompt: "refactor", systemPromptOptions: stockOpts }, { cwd: tmp, model: { provider: "google", id: "gemini-4-argon" } });
-}
-assert.deepEqual(stockOpts.selectedTools, ["read", "bash", "edit", "write"]);
+assert.deepEqual(await prepareRun(gemini), ["read", "bash", "edit", "write"]);
 
-// Activate for the switched model via before_agent_start and verify selectedTools swap
-const promptOpts = { selectedTools: ["read", "bash", "edit", "write"] };
-for (const fn of handlers.get("before_agent_start")) {
-	await fn({ messageType: "user", prompt: "refactor", systemPromptOptions: promptOpts }, {
-		cwd: tmp,
-		model: { provider: "antigravity", id: "gemini-4-carbon" },
-	});
-}
-assert.deepEqual(promptOpts.selectedTools, ["read", "hashline_edit", "bash", "write"]);
+// A tool selected after the extension loaded (late MCP registration) survives the edit -> hashline_edit swap.
+live.active.push("mcp__late__ping");
+assert.deepEqual(await prepareRun(carbon), ["read", "hashline_edit", "bash", "write", "mcp__late__ping"]);
 
-// Switch to Claude and verify selectedTools swaps back to stock edit
-for (const fn of handlers.get("before_agent_start")) {
-	await fn({ messageType: "user", prompt: "refactor", systemPromptOptions: promptOpts }, {
-		cwd: tmp,
-		model: { provider: "anthropic", id: "claude-opus-5-5" },
-	});
-}
-assert.ok(promptOpts.selectedTools.includes("edit") && !promptOpts.selectedTools.includes("hashline_edit"));
+// Switch to Claude: swaps back to stock edit, the late tool stays.
+const claudeTools = await prepareRun(claude);
+assert.ok(claudeTools.includes("edit") && !claudeTools.includes("hashline_edit"));
+assert.ok(claudeTools.includes("mcp__late__ping"));
 
 // Switch back to Gemini for the file operation tests
-for (const fn of handlers.get("before_agent_start")) {
-	await fn({ messageType: "user", prompt: "refactor", systemPromptOptions: promptOpts }, {
-		cwd: tmp,
-		model: { provider: "antigravity", id: "gemini-4-carbon" },
-	});
-}
+await prepareRun(carbon);
 
 // 3. Create two files, run partial read on src/svc.py (lines 1..5 of 8) and full read on src/dest.py
 fs.mkdirSync(path.join(tmp, "src"), { recursive: true });
