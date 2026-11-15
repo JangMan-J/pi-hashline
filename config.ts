@@ -8,73 +8,54 @@ export interface ModelRule {
 	/** Case-insensitive glob matched against `provider/id` and bare `id` (e.g. `antigravity/gemini-*`, `*astra*`, `anthropic/*`). */
 	match: string;
 	use: EditChoice;
-	/** Manual per-model override set with Enter in /hashline (cleared with Ctrl+R); overrides calibrated verdicts. */
+	/** Manual per-model override set with Enter in /hashline (cleared with Ctrl+R); wins over every other rule. */
 	manual?: boolean;
 	note?: string;
 }
 
-export interface CalibratedEntry {
-	use: EditChoice;
-	speedup: number;
-	bytesRatio: number;
-	passReplace: string;
-	passHashline: string;
-	replaceEditMs: number;
-	hashlineEditMs: number;
-	replaceBytes: number;
-	hashlineBytes: number;
-	apiCalls?: number;
-	totalTokens?: number;
-	thinking: string;
-	reason: string;
-	measuredAt: string;
-}
-
 export interface HashlineConfig {
 	version: 1;
-	/** Fallback when neither `calibrated` nor `rules` matches a model. */
+	/** Fallback when no rule matches a model. */
 	defaultUse: EditChoice;
-	/** Minimum edit-turn speedup (`replaceEditMs / hashlineEditMs`) required for `calibrate.mjs` to select `hashline` when both arms pass. */
-	minSpeedup: number;
-	/** Number of paired repeats per task during calibration (median across repeats reduces single-run jitter; default 2 = 8 1-turn calls). */
-	benchRepeats?: number;
-	/**
-	 * Abort a benchmark if it exceeds `maxBenchCalls`, `maxBenchTokens`, or `benchTimeoutSec`.
-	 * Off (`false`) by default so slow or retrying models run to completion unless stopped with Ctrl+B.
-	 */
-	stopOnOverrun?: boolean;
-	/** Optional API-call ceiling per model benchmark when `stopOnOverrun` is true (defaults to 24). */
-	maxBenchCalls?: number;
-	/** Optional token ceiling per model benchmark when `stopOnOverrun` is true (defaults to 120000). */
-	maxBenchTokens?: number;
-	/** Optional per-trial timeout in seconds when `stopOnOverrun` is true (defaults to 300). */
-	benchTimeoutSec?: number;
 	rules: ModelRule[];
-	calibrated: Record<string, CalibratedEntry>;
 }
 
+/**
+ * Installing the extension changes nothing: every model stays on Pi's built-in edit tool until the user
+ * picks hashline for it in `/hashline` (or writes a rule by hand).
+ */
 export const DEFAULT_CONFIG: HashlineConfig = {
 	version: 1,
 	defaultUse: "replace",
-	minSpeedup: 1.15,
-	stopOnOverrun: false,
-	rules: [
-		{ match: "anthropic/*", use: "replace", note: "Claude is RL-tuned for tight oldText anchors (97.7% success, 1.3x inflation)" },
-		{ match: "*/claude-*", use: "replace" },
-		{ match: "*gemini*", use: "hashline", note: "Gemini bloats oldText 4x-22x without line bounds" },
-		{ match: "google/*", use: "hashline" },
-		{ match: "google-vertex/*", use: "hashline" },
-		{ match: "openai/*", use: "hashline" },
-		{ match: "openai-codex/*", use: "hashline" },
-		{ match: "*spark*", use: "replace", note: "omp fallback" },
-		{ match: "kimi*", use: "replace", note: "omp fallback unless calibrated faster" },
-		{ match: "*moonshot*", use: "replace" },
-		{ match: "deepseek/*", use: "replace" },
-		{ match: "*minimax*", use: "replace" },
-		{ match: "*qwen*3.8*", use: "replace" },
-	],
-	calibrated: {},
+	rules: [],
 };
+
+/**
+ * Family rules that earlier versions wrote into every new `hashline.json`. They routed whole model families
+ * to hashline without the user asking, so they are dropped on load. A rule the user set in the picker
+ * (`manual`) or wrote differently is kept.
+ */
+const LEGACY_SEEDED_RULES: readonly (readonly [string, EditChoice])[] = [
+	["anthropic/*", "replace"],
+	["*/claude-*", "replace"],
+	["*gemini*", "hashline"],
+	["google/*", "hashline"],
+	["google-vertex/*", "hashline"],
+	["openai/*", "hashline"],
+	["openai-codex/*", "hashline"],
+	["*spark*", "replace"],
+	["kimi*", "replace"],
+	["*moonshot*", "replace"],
+	["deepseek/*", "replace"],
+	["*minimax*", "replace"],
+	["*qwen*3.8*", "replace"],
+];
+
+function isLegacySeededRule(rule: ModelRule): boolean {
+	if ((rule?.manual ?? (rule as any)?.pinned) === true) return false;
+	const use = normalizeChoice(rule?.use);
+	return LEGACY_SEEDED_RULES.some(([match, legacyUse]) => match === rule?.match && legacyUse === use);
+}
 
 export function resolveConfigPath(agentDir?: string): string {
 	if (process.env.PI_HASHLINE_CONFIG?.trim()) {
@@ -130,7 +111,7 @@ export function resolveModelDecision(
 	const id = (model?.id ?? "").trim().toLowerCase();
 	const full = provider && id ? `${provider}/${id}` : id || provider;
 	if (!full) {
-		return { use: config.defaultUse ?? "replace", source: "no-model" };
+		return { use: normalizeChoice(config.defaultUse) ?? "replace", source: "no-model" };
 	}
 
 	// 1. Manual per-model overrides always win until reset.
@@ -141,18 +122,11 @@ export function resolveModelDecision(
 	);
 	if (manualRule) return { use: manualRule.use, source: `manual:${manualRule.match}` };
 
-	// 2. Empirical calibration result for this exact `provider/id` beats default family wildcards.
-	const calibrated = config.calibrated?.[full];
-	const calUse = normalizeChoice(calibrated?.use);
-	if (calibrated && calUse) {
-		return { use: calUse, source: `calibrated:${full} (${calibrated.speedup}x)` };
-	}
-
-	// 3. Default family/model rules (longest match wins).
+	// 2. Rules the user wrote by hand (longest match wins).
 	const familyRule = matchBestRule(config.rules ?? [], full, id);
 	if (familyRule) return { use: familyRule.use, source: `rule:${familyRule.match}` };
 
-	return { use: config.defaultUse ?? "replace", source: "default" };
+	return { use: normalizeChoice(config.defaultUse) ?? "replace", source: "default" };
 }
 
 let cachedFile: { path: string; mtimeMs: number; size: number; config: HashlineConfig } | undefined;
@@ -171,28 +145,22 @@ export function loadConfigSync(agentDir?: string, seedIfMissing = true, forceRel
 			return structuredClone(cachedFile.config);
 		}
 		const parsed = JSON.parse(fs.readFileSync(file, "utf8")) as Partial<HashlineConfig>;
-		const posNum = (v: unknown): number | undefined =>
-			typeof v === "number" && Number.isFinite(v) && v > 0 ? v : undefined;
 		const normRules = Array.isArray(parsed.rules)
-			? parsed.rules.map((r: any) => {
-					if (r && typeof r === "object" && r.pinned === true && r.manual === undefined) {
-						const { pinned: _legacy, ...rest } = r;
-						return { ...rest, manual: true } as ModelRule;
-					}
-					return r as ModelRule;
-				})
-			: DEFAULT_CONFIG.rules;
+			? parsed.rules
+					.map((r: any) => {
+						if (r && typeof r === "object" && r.pinned === true && r.manual === undefined) {
+							const { pinned: _legacy, ...rest } = r;
+							return { ...rest, manual: true } as ModelRule;
+						}
+						return r as ModelRule;
+					})
+					.filter((r) => !isLegacySeededRule(r))
+			: [];
+		// Keys and family rules written by earlier versions are ignored and dropped on the next save.
 		const config: HashlineConfig = {
 			version: 1,
 			defaultUse: normalizeChoice(parsed.defaultUse) ?? "replace",
-	minSpeedup: posNum(parsed.minSpeedup) ?? 1.15,
-			...(posNum(parsed.benchRepeats) ? { benchRepeats: Math.round(posNum(parsed.benchRepeats)!) } : {}),
-			stopOnOverrun: parsed.stopOnOverrun === true,
-			...(posNum(parsed.maxBenchCalls) ? { maxBenchCalls: posNum(parsed.maxBenchCalls) } : {}),
-			...(posNum(parsed.maxBenchTokens) ? { maxBenchTokens: posNum(parsed.maxBenchTokens) } : {}),
-			...(posNum(parsed.benchTimeoutSec) ? { benchTimeoutSec: posNum(parsed.benchTimeoutSec) } : {}),
 			rules: normRules,
-			calibrated: parsed.calibrated && typeof parsed.calibrated === "object" ? parsed.calibrated : {},
 		};
 		cachedFile = { path: file, mtimeMs: st.mtimeMs, size: st.size, config };
 		return structuredClone(config);

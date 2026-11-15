@@ -17,7 +17,7 @@
     "index.ts",
     "config.ts",
     "picker.ts",
-    "calibrate.mjs",
+    "replay.ts",
     "README.md",
     "LICENSE"
   ],

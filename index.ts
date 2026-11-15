@@ -6,7 +6,8 @@
  * - Zero `oldText` echoed over the wire (`[PATH#TAG]` + `PUT N.=M:`, `PUT N*:`, `<N:`, `>N:`, `>$:`, `CUT`, `MV`, `REM`)
  * - 4-hex content snapshot tags + seen-line guard + AST parse-regression warning
  * - Per-model routing configured in `~/.pi/agent/hashline.json` and managed via `/hashline` (Alt+H):
- *   manual per-model selection > benchmark verdict > default family rules.
+ *   every model stays on the built-in edit tool until the user switches it (or writes a rule by hand).
+ *   The picker shows what hashline would change for each model, replayed from the user's own sessions.
  */
 
 import * as fs from "node:fs";
@@ -20,7 +21,7 @@ import type { KeyId } from "@earendil-works/pi-tui";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { loadConfigSync, resolveModelDecision } from "./config.ts";
-import { type BenchJobState, openHashlineMenu } from "./picker.ts";
+import { openHashlineMenu } from "./picker.ts";
 
 const DEFAULT_SHORTCUT = "alt+h";
 
@@ -463,19 +464,13 @@ export default function piHashlineExtension(pi: ExtensionAPI): void {
 		},
 	});
 
-	const runningJobs = new Map<string, BenchJobState>();
-	const lastBenchErrors = new Map<string, string>();
 	const openMenu = async (ctx: ExtensionContext) => {
-		await openHashlineMenu({
-			ctx,
-			runningJobs,
-			lastBenchErrors,
-		});
+		await openHashlineMenu({ ctx });
 		activeThisRun = shouldUseHashline(ctx.model);
 	};
 
 	pi.registerCommand("hashline", {
-		description: "Open the Hashline edit routing & benchmark picker (Enter swap, Ctrl+R reset, Ctrl+S sort, Ctrl+B bench)",
+		description: "Open the Hashline edit routing picker (Enter swap, Ctrl+D detail, Ctrl+R reset, Ctrl+S sort)",
 		handler: async (_args, ctx) => {
 			await openMenu(ctx);
 		},
@@ -487,7 +482,7 @@ export default function piHashlineExtension(pi: ExtensionAPI): void {
 		if (seenShortcuts.has(norm)) continue;
 		seenShortcuts.add(norm);
 		pi.registerShortcut(shortcut as KeyId, {
-			description: "Open Hashline edit routing & benchmark picker",
+			description: "Open Hashline edit routing picker",
 			handler: async (ctx) => {
 				await openMenu(ctx);
 			},
