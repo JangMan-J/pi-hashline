@@ -5,7 +5,7 @@
  * `hashlineFormatNumberedLines`) in-process via N-API:
  * - Zero `oldText` echoed over the wire (`[PATH#TAG]` + `PUT N.=M:`, `PUT N*:`, `<N:`, `>N:`, `>$:`, `CUT`, `MV`, `REM`)
  * - 4-hex content snapshot tags + seen-line guard + AST parse-regression warning
- * - Per-model routing configured in `~/.pi/agent/hashline.json` and managed via `/hashline` (Alt+H):
+ * - Per-model routing configured in `~/.pi/agent/hashline.json` and managed via `/hashline`:
  *   every model stays on the built-in edit tool until the user switches it (or writes a rule by hand).
  *   The picker shows what hashline would change for each model, replayed from the user's own sessions.
  */
@@ -23,17 +23,15 @@ import { Type } from "typebox";
 import { loadConfigSync, resolveModelDecision } from "./config.ts";
 import { openHashlineMenu } from "./picker.ts";
 
-const DEFAULT_SHORTCUT = "alt+h";
-
+/** The keys the user chose to open the picker with (`"pi-hashline": { "shortcut": ... }` in settings.json); none by default. */
 function resolveShortcuts(): string[] {
 	try {
 		const raw = JSON.parse(fs.readFileSync(path.join(getAgentDir(), "settings.json"), "utf8"));
 		const cfg = raw?.["pi-hashline"]?.shortcut;
-		if (cfg === false) return [];
 		if (typeof cfg === "string") return cfg ? [cfg] : [];
 		if (Array.isArray(cfg)) return cfg.filter((s): s is string => typeof s === "string" && s.length > 0);
 	} catch {}
-	return [DEFAULT_SHORTCUT];
+	return [];
 }
 
 interface OmpNatives {

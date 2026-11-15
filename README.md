@@ -14,9 +14,9 @@ Created automatically on first load (override path with `PI_HASHLINE_CONFIG`). I
 
 Earlier versions seeded every new file with family rules that moved whole model families to hashline, and stored benchmark results. Those seeded rules and the benchmark keys (`calibrated`, `minSpeedup`, `benchRepeats`, …) are ignored and removed the next time the file is saved; your manual selections and any rule you wrote differently are kept.
 
-## Picker (`/hashline`, Alt+H)
+## Picker (`/hashline`)
 
-`/hashline` (no arguments) and Alt+H open the routing picker (rebind with `"pi-hashline": { "shortcut": ... }` in `settings.json`; `false` disables it). Tabs: **Frequent** (current, favorite, previously used, or manually overridden models), **All**, then one tab per provider.
+`/hashline` (no arguments) opens the routing picker. No key is bound by default; `"pi-hashline": { "shortcut": "alt+h" }` in `settings.json` binds one. Tabs: **Frequent** (current, favorite, previously used, or manually overridden models), **All**, then one tab per provider.
 
 Columns: **Model** (a `●` marks only the active model, in green, and favorites, in gold, as in pi-picks), **Provider** (cross-provider tabs only), **Speed** and **Cost** (what hashline would have changed for that model, replayed from your own sessions; see below), **Edit** (`● hashline` / `○ built-in`). The header shows how many models have replayed figures.
 
