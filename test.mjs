@@ -599,8 +599,17 @@ assert.ok(bar(f120).endsWith("  manual → hashline"), bar(f120));
 picker.handleInput(KEY.ctrlR);
 f120 = render(120);
 assert.ok(selectedRow(f120).trimEnd().endsWith("○ built-in") && bar(f120).includes("rule (anthropic) → built-in"), `${selectedRow(f120)} | ${bar(f120)}`);
+// Ctrl+X clears every manual choice in the tab, not only the selected row's.
 picker.handleInput(KEY.enter);
+picker.handleInput(KEY.down);
+picker.handleInput(KEY.enter);
+assert.ok(bar(render(120)).includes("manual →"), bar(render(120)));
 picker.handleInput(KEY.ctrlX);
+for (let i = 0; i < 16; i++) {
+	assert.ok(!bar(render(120)).includes("manual →"), `a manual choice survived Ctrl+X: ${bar(render(120))}`);
+	picker.handleInput(KEY.down);
+}
+for (let i = 0; i < 20 && !selectedRow(render(120)).includes("Claude Opus 5.5"); i++) picker.handleInput(KEY.down);
 assert.ok(bar(render(120)).includes("rule (anthropic) → built-in"));
 // Ctrl+B once ran a benchmark; it is no longer bound to anything.
 const beforeCtrlB = render(120);

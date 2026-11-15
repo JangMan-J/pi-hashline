@@ -684,6 +684,17 @@ export class HashlinePickerComponent {
 		this.applyFilter();
 	}
 
+	/** Ctrl+X: clear the manual choice of every model in the current tab, whatever the search shows of it. */
+	private resetTab(): void {
+		const sel = this.filteredRows[this.rowIndex];
+		if (sel) this.selectedKey = modelKey(sel);
+		for (const model of this.tabSource(this.currentTab())) {
+			if (this.isManual(model)) this.opts.config = this.opts.onResetModel(model);
+		}
+		this.rebuildLists();
+		this.applyFilter();
+	}
+
 	private moveTo(idx: number): void {
 		if (!this.filteredRows.length) return;
 		this.rowIndex = idx;
@@ -701,9 +712,12 @@ export class HashlinePickerComponent {
 			this.cycleSort();
 			return;
 		}
-		// Ctrl+X clears the one row too: it has always been a second key for Ctrl+R here.
-		if (pressed(data, KEYS.reset) || pressed(data, KEYS.clearTab)) {
+		if (pressed(data, KEYS.reset)) {
 			this.resetSelected();
+			return;
+		}
+		if (pressed(data, KEYS.clearTab)) {
+			this.resetTab();
 			return;
 		}
 		// Ctrl+G is Zellij's unlock key: swallow it so it never changes picker state.

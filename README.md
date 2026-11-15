@@ -20,7 +20,7 @@ Earlier versions seeded every new file with family rules that moved whole model 
 
 Columns: **Model** (a `●` marks only the active model, in green, and favorites, in gold, as in pi-picks), **Provider** (cross-provider tabs only), **Speed** and **Cost** (what hashline would have changed for that model, replayed from your own sessions; see below), **Edit** (`● hashline` / `○ built-in`). The header shows how many models have replayed figures.
 
-Keys: `Enter` switch edit tool · `Ctrl+D` floating detail pane for the selected model (any key closes it) · `Ctrl+R` (or `Ctrl+X`) clear the manual override · `Ctrl+S` cycle `▲` then `▼` across visible columns left to right (Model, Provider, Speed, Cost, Edit, plus tab default when distinct) · `Tab`/`Shift+Tab` or `←`/`→` tabs · type to search · `Esc` close.
+Keys: `Enter` switch edit tool · `Ctrl+D` floating detail pane for the selected model (any key closes it) · `Ctrl+R` clear the manual override · `Ctrl+X` clear every manual override in the current tab · `Ctrl+S` cycle `▲` then `▼` across visible columns left to right (Model, Provider, Speed, Cost, Edit, plus tab default when distinct) · `Tab`/`Shift+Tab` or `←`/`→` tabs · type to search · `Esc` close.
 
 ## Transcript replay (`replay.ts`)
 
