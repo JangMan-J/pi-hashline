@@ -61,6 +61,22 @@ const SPEED_MIN_W = Math.max(visibleWidth("Speed ▼"), visibleWidth("+99.9%"));
 const COST_MIN_W = Math.max(visibleWidth("Cost ▼"), visibleWidth("+99.9%"));
 /** Every possible Edit cell fits this fixed width, so toggling never shifts columns. */
 const EDIT_W = Math.max(visibleWidth("● hashline"), visibleWidth("○ built-in"), visibleWidth("Edit ▲"));
+/** Widest terminal the picker fills edge to edge. */
+const WINDOW_W = 128;
+/** Speed, Cost and Edit at their usual widths, two columns apart. */
+const RIGHT_COLS_W = SPEED_MIN_W + 2 + COST_MIN_W + 2 + EDIT_W;
+
+/**
+ * How many columns the picker's text uses in a terminal this wide. A window is filled edge to edge. A wider
+ * screen would put its whole width between a name and its figures, so there the text stops at WINDOW_W until
+ * the terminal's midline passes the Speed, Cost and Edit columns, and from then on those stay centred on it.
+ * Only the rules run the full width.
+ */
+export function contentWidth(termWidth: number): number {
+	if (termWidth <= WINDOW_W) return termWidth;
+	return Math.max(WINDOW_W, Math.ceil((termWidth + RIGHT_COLS_W) / 2));
+}
+const BOTTOM_KEYS = "  Enter swap · Ctrl+D detail · Ctrl+R reset · Ctrl+S sort · Tab · Esc";
 interface Layout {
 	show: boolean;
 	modelW: number;
@@ -326,6 +342,17 @@ export class HashlinePickerComponent {
 	private sort: SortMode = "default";
 	private searchRanked = false;
 	private lastWidth: number | undefined;
+	private lastTermWidth: number | undefined;
+
+	/**
+	 * Left edge of a pane this wide centred over the picker's text, or undefined when the text fills the
+	 * terminal and the terminal's own centre is the same place.
+	 */
+	paneOffsetX(paneWidth: number): number | undefined {
+		if (this.lastTermWidth === undefined) return undefined;
+		const width = contentWidth(this.lastTermWidth);
+		return width < this.lastTermWidth ? Math.max(0, Math.floor((width - paneWidth) / 2)) : undefined;
+	}
 	private topMatchKey: string | undefined;
 	private searchInput: Input;
 	private filteredRows: Model<Api>[] = [];
@@ -779,7 +806,9 @@ export class HashlinePickerComponent {
 		});
 	}
 
-	render(width: number, theme: any): string[] {
+	render(termWidth: number, theme: any): string[] {
+		const width = contentWidth(termWidth);
+		this.lastTermWidth = termWidth;
 		if (width < 28) {
 			return [
 				theme.fg("warning", truncateToWidth("Terminal too narrow for /hashline", Math.max(1, width))),
@@ -804,11 +833,11 @@ export class HashlinePickerComponent {
 				: truncateToWidth(theme.fg("accent", theme.bold(headerTitle)), width);
 
 		const lines: string[] = [
-			theme.fg("accent", "─".repeat(width)),
+			theme.fg("accent", "─".repeat(termWidth)),
 			headerLine,
-			theme.fg("border", "─".repeat(width)),
+			theme.fg("border", "─".repeat(termWidth)),
 			this.renderTabs(width, theme),
-			theme.fg("border", "─".repeat(width)),
+			theme.fg("border", "─".repeat(termWidth)),
 		];
 
 		// Search input
@@ -856,15 +885,19 @@ export class HashlinePickerComponent {
 		const position = rows.length ? this.rowIndex + 1 : 0;
 		const selected = rows[this.rowIndex];
 		let detailLine = `  (${position}/${rows.length})`;
+		const notes: string[] = [];
 		if (selected) {
 			detailLine += ` ${cleanCellText(`${selected.provider}/${selected.id}`)}`;
 			// One plain sentence whenever a figure for this model is not settled yet, whatever the reason.
 			const replayRow = this.replayOf(selected);
 			if (!(replayRow?.speedSettled && replayRow.costSettled)) {
-				detailLine += ` · ${fmtCount(replayRow?.edits.replayed ?? 0)} edits replayed so far; figures settle as you work`;
+				notes.push(`${fmtCount(replayRow?.edits.replayed ?? 0)} edits replayed so far; figures settle as you work`);
 			}
-			detailLine += ` · ${describeDecision(this.decisionOf(selected))}`;
+			notes.push(describeDecision(this.decisionOf(selected)));
 		}
+		// The notes belong on the key bar, right-aligned. Whatever does not fit beside the keys stays on this line.
+		const barNotes = [notes, notes.slice(0, 1), notes.slice(-1)].find((n) => n.length > 0 && this.fitsBottomBar(n, width)) ?? [];
+		for (const note of notes) if (!barNotes.includes(note)) detailLine += ` · ${note}`;
 		// Sorted by Speed or Cost, the Edit column is judged on that measure, and the legend says so.
 		const basis = this.editBasis();
 		const legendGood = basis === "speed" ? "faster tool" : "cheaper tool";
@@ -885,16 +918,24 @@ export class HashlinePickerComponent {
 		}
 
 		// Help bar
-		lines.push(theme.fg("border", "─".repeat(width)));
-		lines.push(this.renderBottomBar(width, theme));
-		lines.push(theme.fg("accent", "─".repeat(width)));
+		lines.push(theme.fg("border", "─".repeat(termWidth)));
+		lines.push(this.renderBottomBar(width, theme, barNotes));
+		lines.push(theme.fg("accent", "─".repeat(termWidth)));
 
-		return lines.map((l) => truncateToWidth(l, width));
+		return lines.map((l) => truncateToWidth(l, termWidth));
 	}
 
-	private renderBottomBar(width: number, theme: any): string {
-		const keys = "  Enter swap · Ctrl+D detail · Ctrl+R reset · Ctrl+S sort · Tab · Esc";
-		return theme.fg("dim", truncateToWidth(keys, width, "…"));
+	/** Whether these notes fit on the key bar with two columns between them and the keys and two before the right edge. */
+	private fitsBottomBar(notes: string[], width: number): boolean {
+		return visibleWidth(BOTTOM_KEYS) + 2 + visibleWidth(notes.join(" · ")) + 2 <= width;
+	}
+
+	/** Key hints on the left; the selected model's notes on the right when they fit. */
+	private renderBottomBar(width: number, theme: any, notes: string[]): string {
+		if (!notes.length) return theme.fg("dim", truncateToWidth(BOTTOM_KEYS, width, "…"));
+		const note = notes.join(" · ");
+		const gap = width - visibleWidth(BOTTOM_KEYS) - visibleWidth(note) - 2;
+		return theme.fg("dim", `${BOTTOM_KEYS}${" ".repeat(gap)}${note}`);
 	}
 
 	/** Replayed time saving as a signed percentage, or empty when the model has no replayable edits. */
@@ -1074,6 +1115,10 @@ export interface OpenHashlineMenuOptions {
 const DETAIL_PANE_WIDTH = 52;
 /** Rows between the bottom of the terminal and the last list row: Pi's footer (about 2), then the picker's rule, key bar, rule and status line. */
 const DETAIL_PANE_LIFT = 6;
+const detailPaneOptions = (offsetX: number | undefined) =>
+	offsetX === undefined
+		? { anchor: "bottom-center" as const, width: DETAIL_PANE_WIDTH, offsetY: -DETAIL_PANE_LIFT }
+		: { anchor: "bottom-left" as const, width: DETAIL_PANE_WIDTH, offsetX, offsetY: -DETAIL_PANE_LIFT };
 /** One transcript replay at a time per agent directory, shared by every open menu. */
 const replayScans = new Map<string, Promise<ReplayTable>>();
 
@@ -1153,7 +1198,8 @@ export async function openHashlineMenu(opts: OpenHashlineMenuOptions): Promise<v
 					.custom<void>((_tui, paneTheme, _kb, closePane) => new HashlineDetailPane(detail, paneTheme, () => closePane()), {
 						overlay: true,
 						// Sit over the list rows: above the picker's status line and key bar, and whatever footer Pi draws below them.
-						overlayOptions: { anchor: "bottom-center", width: DETAIL_PANE_WIDTH, offsetY: -DETAIL_PANE_LIFT },
+						// On a wide screen the picker's text stops short of the right edge, and the pane is centred over the text.
+						overlayOptions: detailPaneOptions(picker.paneOffsetX(DETAIL_PANE_WIDTH)),
 					})
 					.then(() => {
 						if (!closed) tui.requestRender();

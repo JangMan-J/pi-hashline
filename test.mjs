@@ -399,6 +399,9 @@ const KEY = { enter: "\r", down: "\x1b[B", tab: "\t", shiftTab: "\x1b[Z", ctrlB:
 const HEADER_ROW = 6;
 const ROWS = [7, 17];
 const STATUS_ROW = 17;
+const KEYS = "  Enter swap · Ctrl+D detail · Ctrl+R reset · Ctrl+S sort · Tab · Esc";
+/** The key bar: hints on the left, the selected model's notes right-aligned two columns in from the edge. */
+const bar = (f) => f.at(-2);
 const allFrames = [];
 const render = (w, theme = plainTheme) => {
 	const f = picker.render(w, theme);
@@ -414,8 +417,17 @@ const sortUntil = (mode) => {
 	assert.equal(picker.sortMode, mode);
 };
 
-/** Header ends/starts and row cell ends must stay identical across scrolling, toggling, and sorting. Edit is the right-anchored column. */
+/**
+ * Header ends/starts and row cell ends must stay identical across scrolling, toggling, and sorting.
+ * Edit is the last column and ends where the picker's text ends: at the right edge up to 128 columns, at column 128
+ * on a wider screen, and centred with Speed and Cost once the terminal's midline has passed them.
+ */
+const RIGHT_COLS_W = "Speed ▼".length + 2 + "+99.9%".length + 2 + "● hashline".length;
+const editEndAt = (w) => (w <= 128 ? w : Math.max(128, Math.ceil((w + RIGHT_COLS_W) / 2)));
+assert.deepEqual([92, 120, 128, 129, 200, 229, 230, 260].map(editEndAt), [92, 120, 128, 128, 128, 128, 129, 144]);
+assert.deepEqual([92, 128, 200, 260].map(pickerMod.contentWidth), [92, 128, 128, 144]);
 function geometry(w) {
+	const edge = editEndAt(w);
 	const f = render(w);
 	const hdr = f[HEADER_ROW];
 	const editEnds = new Set();
@@ -441,8 +453,8 @@ function geometry(w) {
 		if (sp) speedEnds.add(xOf(row, sp.index + sp[0].length));
 		if (sv) costEnds.add(xOf(row, sv.index + sv[0].length));
 	}
-	assert.deepEqual([...editEnds], [w], `edit cells not right-anchored at ${w}:\n${f.join("\n")}`);
-	assert.equal(editEnd, w, `edit header not right-anchored at ${w}: "${hdr}"`);
+	assert.deepEqual([...editEnds], [edge], `edit cells do not end at ${edge} in ${w} columns:\n${f.join("\n")}`);
+	assert.equal(editEnd, edge, `edit header does not end at ${edge} in ${w} columns: "${hdr}"`);
 	if (provOff >= 0) assert.deepEqual([...provStarts], [provOff], `provider cells misaligned at ${w}:\n${f.join("\n")}`);
 	if (speedEnds.size > 0 && speedEnd >= 0) assert.deepEqual([...speedEnds], [speedEnd], `speed cells misaligned at ${w}:\n${f.join("\n")}`);
 	if (costEnds.size > 0 && costEnd >= 0) assert.deepEqual([...costEnds], [costEnd], `cost cells misaligned at ${w}:\n${f.join("\n")}`);
@@ -455,8 +467,11 @@ const emptySearchLine = f120[5];
 assert.ok(emptySearchLine.startsWith("  Search: "));
 assert.ok(f120[3].includes("Frequent") && f120[3].includes("All") && !f120[3].includes("Benchmarked"), f120[3]);
 assert.ok(selectedRow(f120).startsWith("▶ Claude Opus 5.5 ●"), f120.join("\n"));
-assert.equal(f120[STATUS_ROW].trimEnd(), "  (2/15) anthropic/claude-opus-5-5 · rule (anthropic) → built-in");
-assert.equal(f120.at(-2).trimEnd(), "  Enter swap · Ctrl+D detail · Ctrl+R reset · Ctrl+S sort · Tab · Esc");
+assert.equal(f120[STATUS_ROW].trimEnd(), "  (2/15) anthropic/claude-opus-5-5");
+assert.ok(bar(f120).startsWith(`${KEYS}  `) && bar(f120).endsWith("  rule (anthropic) → built-in"), bar(f120));
+assert.equal(visibleWidth(bar(f120)), 118, "notes end two columns before the right edge");
+assert.ok(bar(render(60)).startsWith(KEYS.slice(0, 50)) && !bar(render(60)).includes("→"), "a narrow key bar holds keys only");
+assert.ok(render(60)[STATUS_ROW].includes("rule (anthropic)"), "notes that do not fit beside the keys stay on the status line");
 assert.ok(f120[1].trimEnd().endsWith("2 replayed"), f120[1]);
 
 // Every column header is accent-coloured, even when unsorted.
@@ -477,18 +492,35 @@ assert.deepEqual(dotted, ["Claude Opus 5.5", "Gemini 4 Argon"], f120.join("\n"))
 assert.ok(!f120.join("\n").includes("★"));
 assert.ok(render(120, markTheme).find((l) => l.includes("Gemini 4 Argon")).includes("\x1b[33m\x1b[1m ●"), "a favorite's dot is gold");
 
-// Settled figures need no comment; anything else gets the same plain sentence on the status line.
-assert.ok(!f120[STATUS_ROW].includes("so far"), f120[STATUS_ROW]);
+// Settled figures need no comment; anything else gets the same plain sentence, on the key bar when it fits and on the status line when it does not.
+assert.ok(!f120[STATUS_ROW].includes("so far") && !bar(f120).includes("so far"), f120[STATUS_ROW]);
 picker.handleInput(KEY.down);
 picker.handleInput(KEY.down);
-assert.ok(render(120)[STATUS_ROW].includes(" · 0 edits replayed so far; figures settle as you work · "), render(120)[STATUS_ROW]);
+assert.ok(render(120)[STATUS_ROW].endsWith(" · 0 edits replayed so far; figures settle as you work") && !bar(render(120)).includes("so far"), render(120)[STATUS_ROW]);
+assert.ok(bar(render(300)).includes("  0 edits replayed so far; figures settle as you work · ") && !render(300)[STATUS_ROW].includes(" · "), bar(render(300)));
 picker.syncState({ replay: replayTable(replayRow("antigravity/gemini-4-argon", 6.3, -2.6), replayRow("anthropic/claude-opus-5-5", 0.9, -3.8, 1137, { speedSettled: false })) });
 for (let i = 0; i < 20 && !selectedRow(render(120)).includes("Claude Opus 5.5"); i++) picker.handleInput(KEY.down);
-assert.ok(render(120)[STATUS_ROW].includes("anthropic/claude-opus-5-5 · 1,137 edits replayed so far; figures settle as you work · rule (anthropic)"), render(120)[STATUS_ROW]);
+assert.ok(render(120)[STATUS_ROW].endsWith("anthropic/claude-opus-5-5 · 1,137 edits replayed so far; figures settle as you work") && bar(render(120)).endsWith("  rule (anthropic) → built-in"), render(120)[STATUS_ROW]);
+assert.ok(bar(render(130)).endsWith("  1,137 edits replayed so far; figures settle as you work") && render(130)[STATUS_ROW].endsWith("anthropic/claude-opus-5-5 · rule (anthropic) → built-in"), bar(render(130)));
+assert.ok(bar(render(300)).endsWith("  1,137 edits replayed so far; figures settle as you work · rule (anthropic) → built-in") && render(300)[STATUS_ROW].endsWith("anthropic/claude-opus-5-5"), bar(render(300)));
+// A wide screen: only the rules run the full width; the title badge, tabs, rows, status line and key bar stop where the Edit column ends.
+const wide = render(252);
+const wideEnd = editEndAt(252);
+assert.equal(wideEnd, 140);
+for (const [i, ln] of wide.entries()) {
+	if (/^─+$/.test(ln)) assert.equal(visibleWidth(ln), 252, `rule ${i} spans the terminal`);
+	else assert.ok(visibleWidth(ln.trimEnd()) <= wideEnd, `line ${i} runs past column ${wideEnd}: "${ln}"`);
+}
+assert.equal(wide.filter((ln) => /^─+$/.test(ln)).length, 5);
+assert.equal(visibleWidth(wide[1].trimEnd()), wideEnd - 2, wide[1]);
+assert.equal(visibleWidth(bar(wide)), wideEnd - 2, bar(wide));
+assert.equal(picker.paneOffsetX(52), Math.floor((wideEnd - 52) / 2), "the detail pane is centred over the text, not the terminal");
+render(120);
+assert.equal(picker.paneOffsetX(52), undefined);
 picker.syncState({ replay: testReplay });
 
 // 0-jitter: header and cell x-offsets identical across scrolling, Enter toggles, Ctrl+R reset and every Ctrl+S mode.
-for (const w of [120, 92]) {
+for (const w of [120, 92, 200, 260]) {
 	const base = geometry(w);
 	const seen = new Set();
 	for (let i = 0; i < 16; i++) {
@@ -513,13 +545,13 @@ for (let i = 0; i < 20 && !selectedRow(render(120)).includes("Claude Opus 5.5");
 picker.handleInput(KEY.enter);
 f120 = render(120);
 assert.ok(selectedRow(f120).trimEnd().endsWith("● hashline"), f120.join("\n"));
-assert.ok(f120[STATUS_ROW].includes("manual → hashline"), f120[STATUS_ROW]);
+assert.ok(bar(f120).endsWith("  manual → hashline"), bar(f120));
 picker.handleInput(KEY.ctrlR);
 f120 = render(120);
-assert.ok(selectedRow(f120).trimEnd().endsWith("○ built-in") && f120[STATUS_ROW].includes("rule (anthropic) → built-in"), `${selectedRow(f120)} | ${f120[STATUS_ROW]}`);
+assert.ok(selectedRow(f120).trimEnd().endsWith("○ built-in") && bar(f120).includes("rule (anthropic) → built-in"), `${selectedRow(f120)} | ${bar(f120)}`);
 picker.handleInput(KEY.enter);
 picker.handleInput(KEY.ctrlX);
-assert.ok(render(120)[STATUS_ROW].includes("rule (anthropic) → built-in"));
+assert.ok(bar(render(120)).includes("rule (anthropic) → built-in"));
 // Ctrl+B once ran a benchmark; it is no longer bound to anything.
 const beforeCtrlB = render(120);
 picker.handleInput(KEY.ctrlB);
@@ -801,9 +833,9 @@ cfgMod.saveConfigSync(structuredClone(cfgMod.DEFAULT_CONFIG), agentDirForMenu);
 let menu;
 const menuDone = openHashlineMenu({ ctx: makeMenuCtx((x) => (menu = x)) });
 assert.ok(selectedRow(menu.comp.render(120)).startsWith("▶ GPT-6 Astra ●"));
-// A fresh install: every model is on the built-in tool, and the status line says it is the default.
+// A fresh install: every model is on the built-in tool, and the key bar says it is the default.
 assert.ok(menu.comp.render(120).slice(...ROWS).filter((l) => l.trim()).every((l) => l.trimEnd().endsWith("○ built-in")));
-assert.ok(menu.comp.render(120)[STATUS_ROW].includes("default → built-in"), menu.comp.render(120)[STATUS_ROW]);
+assert.ok(menu.comp.render(120).at(-2).endsWith("  default → built-in"), menu.comp.render(120).at(-2));
 menu.comp.handleInput(KEY.enter);
 assert.ok(selectedRow(menu.comp.render(120)).trimEnd().endsWith("● hashline"));
 assert.deepEqual(cfgMod.loadConfigSync(agentDirForMenu, false, true).rules, [{ match: "openai-codex/gpt-6-astra", use: "hashline", manual: true, note: "set in /hashline menu" }]);
