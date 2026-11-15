@@ -10,8 +10,8 @@ import * as path from "node:path";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
-import { fuzzyFilter, Input, Key, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-import { type FrameStyle, type Measure, FRAME_ROWS, contentWidth as frameContentWidth, frameLines, spread } from "./frame.ts";
+import { fuzzyFilter, Input, Key, type KeyId, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { type FrameStyle, type Measure, FRAME_ROWS, KEYS, contentWidth as frameContentWidth, frameLines, spread } from "./frame.ts";
 import { type EditChoice, type HashlineConfig, loadConfigSync, resolveModelDecision, saveConfigSync } from "./config.ts";
 import { type ReplayRow, type ReplayTable, loadReplayTable, replaySessions, saveReplayTable } from "./replay.ts";
 
@@ -64,6 +64,8 @@ const COST_MIN_W = Math.max(visibleWidth("Cost ▼"), visibleWidth("+99.9%"));
 const EDIT_W = Math.max(visibleWidth("● hashline"), visibleWidth("○ built-in"), visibleWidth("Edit ▲"));
 /** Speed, Cost and Edit at their usual widths, two columns apart. */
 const RIGHT_COLS_W = SPEED_MIN_W + 2 + COST_MIN_W + 2 + EDIT_W;
+/** Whether the input is one of the keys the suite's pickers share (`KEYS` in frame.ts). */
+const pressed = (data: string, keys: readonly string[]) => keys.some((key) => matchesKey(data, key as KeyId));
 const measure: Measure = { width: visibleWidth, truncate: (text, width) => truncateToWidth(text, width) };
 
 /** How many columns the picker's text uses in a terminal this wide: on a wide screen, Speed, Cost and Edit sit on its midline. */
@@ -690,25 +692,26 @@ export class HashlinePickerComponent {
 
 	handleInput(data: string): void {
 		const n = this.filteredRows.length;
-		if (matchesKey(data, Key.ctrl("d"))) {
+		if (pressed(data, KEYS.detail)) {
 			const sel = this.filteredRows[this.rowIndex];
 			if (sel) this.opts.onShowDetail?.(sel, this.detailFor(sel));
 			return;
 		}
-		if (matchesKey(data, Key.ctrl("s"))) {
+		if (pressed(data, KEYS.sort)) {
 			this.cycleSort();
 			return;
 		}
-		if (matchesKey(data, Key.ctrl("r")) || matchesKey(data, Key.ctrl("x"))) {
+		// Ctrl+X clears the one row too: it has always been a second key for Ctrl+R here.
+		if (pressed(data, KEYS.reset) || pressed(data, KEYS.clearTab)) {
 			this.resetSelected();
 			return;
 		}
 		// Ctrl+G is Zellij's unlock key: swallow it so it never changes picker state.
 		if (matchesKey(data, Key.ctrl("g"))) return;
-		if (matchesKey(data, Key.tab)) return this.switchCategory(1);
-		if (matchesKey(data, Key.shift("tab"))) return this.switchCategory(-1);
-		if (matchesKey(data, Key.shift("up"))) return this.moveTo(Math.max(0, this.rowIndex - 10));
-		if (matchesKey(data, Key.shift("down"))) return this.moveTo(Math.max(0, Math.min(n - 1, this.rowIndex + 10)));
+		if (pressed(data, KEYS.nextTab)) return this.switchCategory(1);
+		if (pressed(data, KEYS.prevTab)) return this.switchCategory(-1);
+		if (pressed(data, KEYS.pageUp)) return this.moveTo(Math.max(0, this.rowIndex - FRAME_ROWS));
+		if (pressed(data, KEYS.pageDown)) return this.moveTo(Math.max(0, Math.min(n - 1, this.rowIndex + FRAME_ROWS)));
 		if (matchesKey(data, Key.up)) return this.moveTo(this.rowIndex === 0 ? n - 1 : this.rowIndex - 1);
 		if (matchesKey(data, Key.down)) return this.moveTo(this.rowIndex === n - 1 ? 0 : this.rowIndex + 1);
 		if (matchesKey(data, Key.left) && this.searchInput.getValue() === "") return this.switchCategory(-1);

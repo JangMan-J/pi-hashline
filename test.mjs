@@ -573,6 +573,23 @@ for (const w of [120, 92, 200, 260]) {
 	assert.equal(picker.sortMode, "default");
 }
 
+// The keys the suite's pickers share: PageDown and Shift+↓ jump ten rows without wrapping, PageUp and Shift+↑ go back.
+{
+	const at = () => /\((\d+)\/(\d+)\)/.exec(render(120)[STATUS_ROW]).slice(1).map(Number);
+	for (let i = 0; i < 40 && at()[0] !== 1; i++) picker.handleInput("\x1b[A");
+	const total = at()[1];
+	assert.ok(total > 10, "the fixture tab has more than one page");
+	picker.handleInput("\x1b[6~");
+	assert.equal(at()[0], 11, "PageDown");
+	picker.handleInput("\x1b[6~");
+	assert.equal(at()[0], Math.min(21, total), "PageDown stops at the last row");
+	picker.handleInput("\x1b[5~");
+	picker.handleInput("\x1b[1;2A");
+	assert.equal(at()[0], 1, "PageUp and Shift+↑ stop at the first row");
+	picker.handleInput("\x1b[1;2B");
+	assert.equal(at()[0], 11, "Shift+↓");
+}
+
 // Enter sets a manual override; Ctrl+R (and Ctrl+X) clears it.
 for (let i = 0; i < 20 && !selectedRow(render(120)).includes("Claude Opus 5.5"); i++) picker.handleInput(KEY.down);
 picker.handleInput(KEY.enter);
