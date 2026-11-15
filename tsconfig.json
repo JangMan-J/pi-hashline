@@ -9,5 +9,5 @@
     "skipLibCheck": true,
     "types": ["node"]
   },
-  "include": ["index.ts", "config.ts", "picker.ts", "replay.ts", "frame.ts"]
+  "include": ["index.ts", "config.ts", "picker.ts", "replay.ts", "frame.ts", "edit-errors.ts"]
 }

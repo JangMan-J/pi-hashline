@@ -36,6 +36,35 @@ const jiti = createJiti(import.meta.url, {
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pi-hl-test-"));
 process.env.PI_CODING_AGENT_DIR = path.join(tmp, "agent");
 
+const { notFoundMessage, notUniqueMessage } = await jiti.import(path.join(import.meta.dirname, "edit-errors.ts"));
+
+// The full retry target outranks a partial decoy despite indentation drift.
+{
+	const file = ["decoy:", "  save();", "  unrelated();", "", "target:", "\tif (ready) {", "\t  save();", "\t}", "done"].join("\n");
+	const message = notFoundMessage(file, "    if (ready) {\n        save();\n    }");
+	assert.ok(message.startsWith("Text not found. Closest hunks"));
+	assert.ok(message.indexOf("6: \tif (ready) {") < message.indexOf("2:   save();"));
+	assert.match(message, /7: \t  save\(\);\n8: \t}/);
+	assert.equal(notFoundMessage(file, "absent();"), "Text not found; no overlapping nonblank lines.");
+}
+
+// Exact multiline matches, including a match at the file start, retain original line numbers.
+{
+	const message = notUniqueMessage("hit\nend\nbefore second\nhit\nend\nbefore third\nhit\nend", "hit\nend");
+	assert.match(message, /^3 exact occurrences/);
+	assert.deepEqual([...message.matchAll(/at line (\d+):/g)].map(m => Number(m[1])), [1, 4, 7]);
+	assert.ok(message.includes("3: before second\n4: hit"));
+	assert.ok(message.includes("6: before third\n7: hit"));
+}
+
+// Count all matches but do not flood subsequent turns with more than eight previews.
+{
+	const message = notUniqueMessage(Array.from({ length: 11 }, (_, i) => `context ${i}\nhit`).join("\n"), "hit");
+	assert.match(message, /^11 exact occurrences \(showing first 8\)/);
+	assert.deepEqual([...message.matchAll(/at line (\d+):/g)].map(m => Number(m[1])), [2, 4, 6, 8, 10, 12, 14, 16]);
+	assert.ok(!message.includes("context 8"));
+}
+
 const mod = await jiti.import(path.join(import.meta.dirname, "index.ts"));
 const cfgMod = await jiti.import(path.join(import.meta.dirname, "config.ts"));
 const ext = mod.default;
