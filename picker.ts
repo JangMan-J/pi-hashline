@@ -17,7 +17,6 @@ import {
 	type EditChoice,
 	type HashlineConfig,
 	loadConfigSync,
-	type OverrideMode,
 	resolveConfigPath,
 	resolveModelDecision,
 	saveConfigSync,
@@ -29,23 +28,55 @@ const ALL_TAB = "\0all";
 
 const CALIBRATE_SCRIPT = path.resolve(import.meta.dirname, "calibrate.mjs");
 
-export type SortMode = "default" | "speed" | "edit" | "bench" | "model" | "provider";
-const SORT_CYCLE: SortMode[] = ["default", "speed", "edit", "bench", "model", "provider"];
+export type SortMode =
+	| "default"
+	| "model-asc"
+	| "model-desc"
+	| "provider-asc"
+	| "provider-desc"
+	| "bench-asc"
+	| "bench-desc"
+	| "saved-asc"
+	| "saved-desc"
+	| "edit-asc"
+	| "edit-desc"
+	| "recommended-asc"
+	| "recommended-desc";
 
-type Column = "model" | "provider" | "speed" | "edit" | "bench";
-type RightColumn = "speed" | "edit" | "bench";
-const RIGHT_ORDER: RightColumn[] = ["speed", "edit", "bench"];
+type Column = "model" | "provider" | "bench" | "saved" | "edit" | "recommended";
+type RightColumn = "bench" | "saved" | "edit" | "recommended";
+const RIGHT_ORDER: RightColumn[] = ["bench", "saved", "edit", "recommended"];
 /** Narrow-width drop order: Edit stays longest because toggling it is the primary action. */
-const DROP_ORDER: RightColumn[] = ["speed", "bench", "edit"];
-const HEADER_LABEL: Record<Column, string> = { model: "Model", provider: "Provider", speed: "Speed", edit: "Edit", bench: "Bench" };
-const ARROW: Record<Column, string> = { model: "▲", provider: "▲", speed: "▼", edit: "▲", bench: "▲" };
+const DROP_ORDER: RightColumn[] = ["saved", "bench", "recommended", "edit"];
+const HEADER_LABEL: Record<Column, string> = {
+	model: "Model",
+	provider: "Provider",
+	bench: "Bench",
+	saved: "Saved",
+	edit: "Edit",
+	recommended: "Recommended",
+};
+const SORT_INFO: Record<Exclude<SortMode, "default">, { column: Column; arrow: "▲" | "▼" }> = {
+	"model-asc": { column: "model", arrow: "▲" },
+	"model-desc": { column: "model", arrow: "▼" },
+	"provider-asc": { column: "provider", arrow: "▲" },
+	"provider-desc": { column: "provider", arrow: "▼" },
+	"bench-asc": { column: "bench", arrow: "▲" },
+	"bench-desc": { column: "bench", arrow: "▼" },
+	"saved-asc": { column: "saved", arrow: "▲" },
+	"saved-desc": { column: "saved", arrow: "▼" },
+	"edit-asc": { column: "edit", arrow: "▲" },
+	"edit-desc": { column: "edit", arrow: "▼" },
+	"recommended-asc": { column: "recommended", arrow: "▲" },
+	"recommended-desc": { column: "recommended", arrow: "▼" },
+};
 
 export const GAUGE_ICON = "\uf0e4";
-export const EST_BENCH_CALLS = 12;
-export const EST_BENCH_TOK_K = 38;
-/** Unmeasured fallback, shown only when no calibrated entry recorded apiCalls/totalTokens. */
-export const EST_BENCH_HINT = `bench: ~8–${EST_BENCH_CALLS} calls · ~${EST_BENCH_TOK_K}k tok (est.)`;
-
+export const EST_BENCH_MIN_CALLS = 8;
+export const EST_BENCH_CALLS = 8;
+export const EST_BENCH_TOK_K = 60;
+/** Unmeasured fallback (2 tasks [420 + 936 lines] × 2 arms × 2 repeats = 8 pre-seeded 1-turn calls, ~60k tok). */
+export const EST_BENCH_HINT = `bench: ~${EST_BENCH_CALLS} calls · ~${EST_BENCH_TOK_K}k tok (est.)`;
 /** Average recorded cost of one benchmark over calibrated entries that have both `apiCalls` and `totalTokens`. */
 export function benchHint(calibrated?: Record<string, CalibratedEntry>): string {
 	const runs = Object.values(calibrated ?? {}).filter(
@@ -57,15 +88,16 @@ export function benchHint(calibrated?: Record<string, CalibratedEntry>): string 
 	return `bench: ~${calls} calls · ~${tokK}k tok (avg of ${runs.length})`;
 }
 
-const SPEED_MIN_W = Math.max(visibleWidth("Speed ▼"), visibleWidth("99.99×"));
-/** Every possible Edit / Bench cell fits these fixed widths, so toggles and benchmarks never shift columns. */
-const EDIT_W = Math.max(visibleWidth("* ● hashline"), visibleWidth("* ○ built-in"), visibleWidth("Edit ▲"));
-const BENCH_W = Math.max(
-	...[`${GAUGE_ICON} ██████ 8/8`, "✗ failed", "✓ hashline", "✓ built-in", "—", "Bench ▲"].map((s) => visibleWidth(s)),
+const BENCH_MIN_W = Math.max(visibleWidth("Bench ▼"), visibleWidth("99.99×"));
+const SAVED_MIN_W = Math.max(visibleWidth("Saved ▼"), visibleWidth("+100%"));
+/** Every possible Edit / Recommended cell fits these fixed widths, so toggles and benchmarks never shift columns. */
+const EDIT_W = Math.max(visibleWidth("● hashline"), visibleWidth("○ built-in"), visibleWidth("Edit ▲"));
+const RECOMMENDED_W = Math.max(
+	...[`${GAUGE_ICON} ██████ 12/12`, "✗ failed", "✓ hashline", "✓ built-in", "—", "Recommended ▲"].map((s) => visibleWidth(s)),
 );
 
 type BenchVerdict = "faster" | "keep" | "error" | "untested";
-const BENCH_RANK: Record<BenchVerdict, number> = { faster: 0, keep: 1, error: 2, untested: 3 };
+const TESTED_BENCH_SCORE: Record<Exclude<BenchVerdict, "untested">, number> = { error: 0, keep: 1, faster: 2 };
 
 interface Layout {
 	show: boolean;
@@ -129,6 +161,10 @@ export function fmtTokens(n: number): string {
 	return n >= 1000 ? `${(n / 1000).toFixed(1).replace(/\.0$/, "")}k` : String(n);
 }
 
+export function fmtBytes(n: number): string {
+	return n >= 1024 ? `${(n / 1024).toFixed(1).replace(/\.0$/, "")}KB` : `${Math.round(n)}B`;
+}
+
 /** Live 12-column Nerd Font progress gauge (` ██▓░░░ 3/8`) for a running benchmark job. */
 export function formatBenchGauge(
 	job: BenchJobState,
@@ -161,19 +197,21 @@ export function describeDecision(dec: { use: EditChoice; source: string }, cal?:
 	const detail = rest.join(":");
 	const tool = editToolLabel(dec.use);
 	switch (kind) {
-		case "pinned":
-			return `pinned → ${tool}`;
+		case "manual":
+			return `manual → ${tool}`;
 		case "calibrated": {
+			const bytes =
+				cal?.replaceBytes && cal?.hashlineBytes
+					? ` · payload ${fmtBytes(cal.hashlineBytes)} vs ${fmtBytes(cal.replaceBytes)}`
+					: "";
 			const usage =
 				cal?.apiCalls && cal?.totalTokens ? ` (${cal.apiCalls} calls · ${fmtTokens(cal.totalTokens)} tok)` : "";
-			return `benchmarked → ${tool}${usage}`;
+			return `benchmarked → ${tool}${bytes}${usage}`;
 		}
 		case "rule": {
 			const short = detail.replace(/\*/g, "").replace(/^\/+|\/+$/g, "") || detail;
 			return `rule (${short}) → ${tool}`;
 		}
-		case "override":
-			return `mode ${detail} → ${tool}`;
 		default:
 			return `default → ${tool}`;
 	}
@@ -263,13 +301,11 @@ export interface PickerCallbacks {
 	currentModel: Model<Api> | undefined;
 	usage: UsageSnapshot;
 	config: HashlineConfig;
-	overrideMode: OverrideMode;
 	runningJobs: Map<string, BenchJobState>;
 	lastBenchErrors: Map<string, string>;
 	now?: () => number;
 	onToggleModel: (model: Model<Api>, nextUse: EditChoice) => HashlineConfig;
-	onUnpinModel: (model: Model<Api>) => HashlineConfig;
-	onCycleOverrideMode: () => OverrideMode;
+	onResetModel: (model: Model<Api>) => HashlineConfig;
 	onToggleBenchmark: (model: Model<Api>) => void;
 	onClose: () => void;
 }
@@ -288,7 +324,9 @@ export class HashlinePickerComponent {
 	private rowIndex = 0;
 	private selectedKey: string | undefined;
 	private sort: SortMode = "default";
-
+	private searchRanked = false;
+	private lastWidth: number | undefined;
+	private topMatchKey: string | undefined;
 	private searchInput: Input;
 	private filteredRows: Model<Api>[] = [];
 	private globalMatches: Model<Api>[] = [];
@@ -316,9 +354,9 @@ export class HashlinePickerComponent {
 		this.searchInput.focused = v;
 	}
 
-	/** Active sort mode (`provider` collapses to `default` on single-provider tabs). */
+	/** Effective sort mode for the active tab, query state, and visible columns. */
 	get sortMode(): SortMode {
-		return this.sort === "provider" && !this.crossProvider ? "default" : this.sort;
+		return this.effectiveSortMode();
 	}
 
 	private get tabs(): string[] {
@@ -365,13 +403,13 @@ export class HashlinePickerComponent {
 		return this.opts.config.calibrated?.[modelKey(m)];
 	}
 
-	private isPinned(m: Model<Api>): boolean {
+	private isManual(m: Model<Api>): boolean {
 		const key = modelKey(m);
-		return (this.opts.config.rules ?? []).some((r) => r.pinned === true && r.match.toLowerCase() === key);
+		return (this.opts.config.rules ?? []).some((r) => (r.manual ?? (r as any).pinned) === true && r.match.toLowerCase() === key);
 	}
 
 	private decisionOf(m: Model<Api>): { use: EditChoice; source: string } {
-		return resolveModelDecision(this.opts.config, this.opts.overrideMode, m);
+		return resolveModelDecision(this.opts.config, m);
 	}
 
 	/** Bench verdict ignoring a running job, so starting Ctrl+B never reorders rows. */
@@ -388,24 +426,29 @@ export class HashlinePickerComponent {
 		allModels?: Model<Api>[];
 		currentModel?: Model<Api>;
 		config?: HashlineConfig;
-		overrideMode?: OverrideMode;
 	}): void {
 		const prevTab = this.currentTab();
 		if (patch.allModels !== undefined) this.opts.allModels = patch.allModels;
 		if (patch.currentModel !== undefined) this.opts.currentModel = patch.currentModel;
 		if (patch.config !== undefined) this.opts.config = patch.config;
-		if (patch.overrideMode !== undefined) this.opts.overrideMode = patch.overrideMode;
 		this.rebuildLists();
 		const idx = this.tabs.indexOf(prevTab);
 		this.catIndex = idx >= 0 ? idx : 0;
 		this.applyFilter();
 	}
 
-	private byModel = (a: Model<Api>, b: Model<Api>): number =>
-		modelLabel(a).localeCompare(modelLabel(b)) || a.id.localeCompare(b.id);
+	private byModelAsc = (a: Model<Api>, b: Model<Api>): number =>
+		modelLabel(a).localeCompare(modelLabel(b)) ||
+		providerLabel(a.provider).localeCompare(providerLabel(b.provider)) ||
+		a.id.localeCompare(b.id);
 
-	private byProvider = (a: Model<Api>, b: Model<Api>): number =>
-		providerLabel(a.provider).localeCompare(providerLabel(b.provider));
+	private byModelDesc = (a: Model<Api>, b: Model<Api>): number =>
+		modelLabel(b).localeCompare(modelLabel(a)) ||
+		providerLabel(a.provider).localeCompare(providerLabel(b.provider)) ||
+		a.id.localeCompare(b.id);
+
+	private byProvider = (dir: 1 | -1) => (a: Model<Api>, b: Model<Api>): number =>
+		dir * providerLabel(a.provider).localeCompare(providerLabel(b.provider)) || this.byModelAsc(a, b);
 
 	private rebuildLists(): void {
 		const map = new Map<string, Model<Api>[]>();
@@ -415,14 +458,14 @@ export class HashlinePickerComponent {
 		}
 		this.byCategory = new Map([...map.entries()].sort(([a], [b]) => a.localeCompare(b)));
 		this.categories = Array.from(this.byCategory.keys());
-		this.allSorted = [...map.values()].flat().sort((a, b) => this.byModel(a, b) || this.byProvider(a, b));
+		this.allSorted = [...map.values()].flat().sort(this.byModelAsc);
 		this.frequentSorted = this.allSorted.filter(
 			(m) =>
 				this.isCurrent(m) ||
 				this.isFavorite(m) ||
 				this.usageCount(m) > 0 ||
 				this.calibratedOf(m) !== undefined ||
-				this.isPinned(m),
+				this.isManual(m),
 		);
 		this.benchmarkedSorted = this.allSorted.filter(
 			(m) => this.calibratedOf(m) !== undefined || this.opts.runningJobs.has(modelKey(m)),
@@ -436,65 +479,143 @@ export class HashlinePickerComponent {
 		return cal.speedup;
 	}
 
-	private sortRows(rows: Model<Api>[]): Model<Api>[] {
-		const mode = this.sortMode;
+	/** Fraction of edit payload bytes saved by hashline (`1 - hashlineBytes / replaceBytes`, e.g. `0.79` -> `-79%`). */
+	private measuredSaved(m: Model<Api>): number | undefined {
+		if (this.benchVerdict(m) === "error") return undefined;
+		const cal = this.calibratedOf(m);
+		if (!cal) return undefined;
+		if (Number.isFinite(cal.replaceBytes) && Number.isFinite(cal.hashlineBytes) && cal.replaceBytes > 0) {
+			return 1 - cal.hashlineBytes / cal.replaceBytes;
+		}
+		if (Number.isFinite(cal.bytesRatio) && cal.bytesRatio > 0) {
+			return 1 - 1 / cal.bytesRatio;
+		}
+		return undefined;
+	}
+
+	private putsCurrentFirst(rows: readonly Model<Api>[]): boolean {
+		if (!this.opts.currentModel || rows.length <= 1) return false;
+		if (!rows.some((m) => this.isCurrent(m))) return false;
+		const first = rows.reduce((best, m) => (this.byModelAsc(m, best) < 0 ? m : best), rows[0]!);
+		return !this.isCurrent(first);
+	}
+
+	private visibleColumns(): Column[] {
+		if (this.lastWidth !== undefined && this.lastWidth >= 28) {
+			const L = this.layout(this.lastWidth);
+			return ["model", ...(L.show ? ["provider" as const] : []), ...L.right];
+		}
+		return ["model", ...(this.crossProvider ? ["provider" as const] : []), ...RIGHT_ORDER];
+	}
+
+	private hasDistinctDefault(): boolean {
+		if (this.searchInput.getValue().trim() !== "") return true;
+		const tab = this.currentTab();
+		if (tab === FREQUENT_TAB) return true;
+		if (tab === BENCHMARKED_TAB || tab === ALL_TAB) return false;
+		return this.putsCurrentFirst(this.tabSource(tab));
+	}
+
+	private fallbackSortMode(cols: Set<Column>): Exclude<SortMode, "default"> {
+		return this.currentTab() === BENCHMARKED_TAB && cols.has("bench") ? "bench-desc" : "model-asc";
+	}
+
+	private effectiveSortMode(): SortMode {
+		const hasQuery = this.searchInput.getValue().trim() !== "";
+		if (hasQuery && this.searchRanked) return "default";
+		const cols = new Set(this.visibleColumns());
+		if (this.sort === "default") return this.hasDistinctDefault() ? "default" : this.fallbackSortMode(cols);
+		if (!cols.has(SORT_INFO[this.sort].column)) {
+			return this.hasDistinctDefault() ? "default" : this.fallbackSortMode(cols);
+		}
+		return this.sort;
+	}
+
+	private activeSortHeader(): { column: Column; arrow: "▲" | "▼" } | undefined {
+		const eff = this.effectiveSortMode();
+		return eff === "default" ? undefined : SORT_INFO[eff];
+	}
+
+	private sortRows(rows: Model<Api>[], mode = this.effectiveSortMode()): Model<Api>[] {
 		const byFrequent = (a: Model<Api>, b: Model<Api>) =>
 			this.usageCount(b) - this.usageCount(a) ||
 			Number(this.isFavorite(b)) - Number(this.isFavorite(a)) ||
-			this.byModel(a, b) ||
-			this.byProvider(a, b);
-		const byModelProv = (a: Model<Api>, b: Model<Api>) => this.byModel(a, b) || this.byProvider(a, b);
-		const bySpeed = (a: Model<Api>, b: Model<Api>) => {
+			this.byModelAsc(a, b);
+		const byBenchRatio = (dir: 1 | -1) => (a: Model<Api>, b: Model<Api>) => {
 			const sa = this.measuredSpeed(a);
 			const sb = this.measuredSpeed(b);
-			if (sa !== undefined && sb !== undefined) return sb - sa || byModelProv(a, b);
+			if (sa !== undefined && sb !== undefined) return dir * (sa - sb) || this.byModelAsc(a, b);
 			if (sa !== undefined) return -1;
 			if (sb !== undefined) return 1;
-			return byModelProv(a, b);
+			return this.byModelAsc(a, b);
+		};
+		const bySaved = (dir: 1 | -1) => (a: Model<Api>, b: Model<Api>) => {
+			const sa = this.measuredSaved(a);
+			const sb = this.measuredSaved(b);
+			if (sa !== undefined && sb !== undefined) return dir * (sa - sb) || this.byModelAsc(a, b);
+			if (sa !== undefined) return -1;
+			if (sb !== undefined) return 1;
+			return this.byModelAsc(a, b);
+		};
+		const editRank = (m: Model<Api>) => {
+			const d = this.decisionOf(m);
+			return (d.use === "hashline" ? 2 : 0) + (d.source.startsWith("manual:") ? 1 : 0);
+		};
+		const byRecommended = (dir: 1 | -1) => (a: Model<Api>, b: Model<Api>) => {
+			const va = this.benchVerdict(a);
+			const vb = this.benchVerdict(b);
+			if (va !== "untested" && vb !== "untested") {
+				return dir * (TESTED_BENCH_SCORE[va] - TESTED_BENCH_SCORE[vb]) || byBenchRatio(dir)(a, b);
+			}
+			if (va !== "untested") return -1;
+			if (vb !== "untested") return 1;
+			return this.byModelAsc(a, b);
 		};
 		let cmp: (a: Model<Api>, b: Model<Api>) => number;
 		switch (mode) {
-			case "speed":
-				cmp = bySpeed;
+			case "model-asc":
+				cmp = this.byModelAsc;
 				break;
-			case "edit":
-				cmp = (a, b) => {
-					const da = this.decisionOf(a);
-					const db = this.decisionOf(b);
-					return (
-						Number(db.use === "hashline") - Number(da.use === "hashline") ||
-						Number(db.source.startsWith("pinned:")) - Number(da.source.startsWith("pinned:")) ||
-						byModelProv(a, b)
-					);
-				};
+			case "model-desc":
+				cmp = this.byModelDesc;
 				break;
-			case "bench":
-				cmp = (a, b) =>
-					BENCH_RANK[this.benchVerdict(a)] - BENCH_RANK[this.benchVerdict(b)] || bySpeed(a, b);
+			case "provider-asc":
+				cmp = this.byProvider(1);
 				break;
-			case "model":
-				cmp = byModelProv;
+			case "provider-desc":
+				cmp = this.byProvider(-1);
 				break;
-			case "provider":
-				cmp = (a, b) => this.byProvider(a, b) || this.byModel(a, b);
+			case "bench-asc":
+				cmp = byBenchRatio(1);
+				break;
+			case "bench-desc":
+				cmp = byBenchRatio(-1);
+				break;
+			case "saved-asc":
+				cmp = bySaved(1);
+				break;
+			case "saved-desc":
+				cmp = bySaved(-1);
+				break;
+			case "edit-asc":
+				cmp = (a, b) => editRank(a) - editRank(b) || this.byModelAsc(a, b);
+				break;
+			case "edit-desc":
+				cmp = (a, b) => editRank(b) - editRank(a) || this.byModelAsc(a, b);
+				break;
+			case "recommended-asc":
+				cmp = byRecommended(1);
+				break;
+			case "recommended-desc":
+				cmp = byRecommended(-1);
 				break;
 			default:
 				if (this.currentTab() === FREQUENT_TAB) cmp = byFrequent;
-				else if (this.currentTab() === BENCHMARKED_TAB) cmp = bySpeed;
-				else if (this.crossProvider) cmp = byModelProv;
-				else cmp = (a, b) => Number(this.isCurrent(b)) - Number(this.isCurrent(a)) || byModelProv(a, b);
+				else if (this.currentTab() === BENCHMARKED_TAB) cmp = byBenchRatio(-1);
+				else if (this.crossProvider) cmp = this.byModelAsc;
+				else cmp = (a, b) => Number(this.isCurrent(b)) - Number(this.isCurrent(a)) || this.byModelAsc(a, b);
 		}
 		return [...rows].sort(cmp);
-	}
-
-	private activeSortColumn(): Column | undefined {
-		const mode = this.sortMode;
-		if (mode === "default") {
-			if (this.currentTab() === FREQUENT_TAB) return undefined;
-			if (this.currentTab() === BENCHMARKED_TAB) return "speed";
-			return "model";
-		}
-		return mode;
 	}
 
 	private applyFilter(): void {
@@ -502,7 +623,16 @@ export class HashlinePickerComponent {
 		const searchText = (m: Model<Api>) =>
 			`${m.name} ${m.id} ${m.provider} ${editToolLabel(this.decisionOf(m).use)} ${this.calibratedOf(m) ? "benchmarked" : "unbenched"}`;
 		this.globalMatches = fuzzyFilter(this.allSorted, query, searchText);
-		this.filteredRows = fuzzyFilter(this.sortRows(this.tabSource(this.currentTab())), query, searchText);
+		const tabRows = this.tabSource(this.currentTab());
+		const eff = this.effectiveSortMode();
+		if (query) {
+			const matched = fuzzyFilter(tabRows, query, searchText);
+			this.topMatchKey = matched[0] ? modelKey(matched[0]) : undefined;
+			this.filteredRows = eff === "default" ? matched : this.sortRows(matched, eff);
+		} else {
+			this.topMatchKey = undefined;
+			this.filteredRows = this.sortRows(tabRows, eff);
+		}
 		this.matchingProviders = new Set(this.globalMatches.map((m) => m.provider));
 
 		if (this.selectedKey) {
@@ -517,11 +647,14 @@ export class HashlinePickerComponent {
 	}
 
 	private cycleSort(): void {
-		let idx = SORT_CYCLE.indexOf(this.sortMode);
-		do {
-			idx = (idx + 1) % SORT_CYCLE.length;
-		} while (SORT_CYCLE[idx] === "provider" && !this.crossProvider);
-		this.sort = SORT_CYCLE[idx]!;
+		const hasQuery = this.searchInput.getValue().trim() !== "";
+		const cols = new Set(this.visibleColumns());
+		const colModes = (Object.keys(SORT_INFO) as Exclude<SortMode, "default">[]).filter((m) => cols.has(SORT_INFO[m].column));
+		const cycle: SortMode[] = this.hasDistinctDefault() ? ["default", ...colModes] : colModes;
+		const cur = this.effectiveSortMode();
+		const next = cycle[(cycle.indexOf(cur) + 1) % cycle.length]!;
+		this.sort = next;
+		this.searchRanked = hasQuery && next === "default";
 		const sel = this.filteredRows[this.rowIndex];
 		if (sel) this.selectedKey = modelKey(sel);
 		this.applyFilter();
@@ -560,11 +693,11 @@ export class HashlinePickerComponent {
 		this.applyFilter();
 	}
 
-	private unpinSelected(): void {
+	private resetSelected(): void {
 		const sel = this.filteredRows[this.rowIndex];
 		if (!sel) return;
 		this.selectedKey = modelKey(sel);
-		this.opts.config = this.opts.onUnpinModel(sel);
+		this.opts.config = this.opts.onResetModel(sel);
 		this.rebuildLists();
 		this.applyFilter();
 	}
@@ -591,13 +724,8 @@ export class HashlinePickerComponent {
 			this.cycleSort();
 			return;
 		}
-		if (matchesKey(data, Key.ctrl("u"))) {
-			this.unpinSelected();
-			return;
-		}
-		if (matchesKey(data, Key.ctrl("o"))) {
-			this.opts.overrideMode = this.opts.onCycleOverrideMode();
-			this.applyFilter();
+		if (matchesKey(data, Key.ctrl("r")) || matchesKey(data, Key.ctrl("x"))) {
+			this.resetSelected();
 			return;
 		}
 		// Ctrl+G is Zellij's unlock key: swallow it so it never changes picker state.
@@ -615,17 +743,18 @@ export class HashlinePickerComponent {
 		this.searchInput.handleInput(data);
 		const after = this.searchInput.getValue();
 		if (before !== after) {
+			this.searchRanked = after.trim() !== "";
 			this.rowIndex = 0;
 			this.selectedKey = undefined;
 			this.applyFilter();
 		}
 	}
 
-	/** Column widths measured over every row of the active tab plus headers-with-arrow and fixed Edit/Bench widths. */
+	/** Column widths measured over every row of the active tab plus headers-with-arrow and fixed Edit/Recommended widths. */
 	private layout(width: number): Layout {
 		const rows = this.tabSource(this.currentTab());
 		const show = this.crossProvider;
-		const hw = (c: Column) => visibleWidth(`${HEADER_LABEL[c]} ${ARROW[c]}`);
+		const hw = (c: Column) => visibleWidth(`${HEADER_LABEL[c]} ▲`);
 		const model = Math.max(
 			hw("model"),
 			...rows.map((m) => visibleWidth(cleanCellText(modelLabel(m))) + (this.isFavorite(m) ? 2 : 0) + 2),
@@ -634,9 +763,10 @@ export class HashlinePickerComponent {
 			? Math.max(hw("provider"), ...rows.map((m) => visibleWidth(`[${cleanCellText(providerLabel(m.provider))}]`)))
 			: 0;
 		const w: Record<RightColumn, number> = {
-			speed: Math.max(SPEED_MIN_W, ...rows.map((m) => visibleWidth(this.fmtSpeed(m)))),
+			bench: Math.max(BENCH_MIN_W, ...rows.map((m) => visibleWidth(this.fmtBenchRatio(m)))),
+			saved: Math.max(SAVED_MIN_W, ...rows.map((m) => visibleWidth(this.fmtSaved(m)))),
 			edit: EDIT_W,
-			bench: BENCH_W,
+			recommended: RECOMMENDED_W,
 		};
 		const right = [...RIGHT_ORDER];
 		const rightW = () => right.reduce((s, k) => s + 2 + w[k], 0);
@@ -674,15 +804,14 @@ export class HashlinePickerComponent {
 	}
 
 	private renderHeader(L: Layout, theme: any): string {
-		const hasQuery = this.searchInput.getValue().trim() !== "";
-		const active = hasQuery ? undefined : this.activeSortColumn();
+		const active = this.activeSortHeader();
 		const cell = (c: Column, maxW: number): Cell => {
-			const isActive = c === active;
+			const isActive = c === active?.column;
 			if (!isActive) {
 				const text = truncateToWidth(HEADER_LABEL[c], Math.max(1, maxW), "");
 				return { styled: theme.fg("accent", text), w: visibleWidth(text) };
 			}
-			const arrow = maxW >= 3 ? ` ${ARROW[c]}` : "";
+			const arrow = maxW >= 3 ? ` ${active!.arrow}` : "";
 			const label = truncateToWidth(HEADER_LABEL[c], Math.max(1, maxW - visibleWidth(arrow)), "");
 			const styled =
 				theme.bold(theme.fg("accent", label)) + (arrow ? theme.bold(theme.fg("warning", arrow)) : "");
@@ -691,9 +820,10 @@ export class HashlinePickerComponent {
 		return this.compose(L, { styled: "  ", w: 2 }, {
 			model: cell("model", L.modelW),
 			provider: cell("provider", L.provW),
-			speed: cell("speed", L.w.speed),
-			edit: cell("edit", L.w.edit),
 			bench: cell("bench", L.w.bench),
+			saved: cell("saved", L.w.saved),
+			edit: cell("edit", L.w.edit),
+			recommended: cell("recommended", L.w.recommended),
 		});
 	}
 
@@ -704,17 +834,21 @@ export class HashlinePickerComponent {
 				theme.fg("dim", truncateToWidth("Esc: close", Math.max(1, width))),
 			];
 		}
+		if (this.lastWidth !== width) {
+			this.lastWidth = width;
+			this.applyFilter();
+		}
 
 		const benchCount = Object.keys(this.opts.config.calibrated ?? {}).length;
 		const runningCount = this.opts.runningJobs.size;
 		const headerTitle = "  Hashline Edit Routing";
-		const modeBadge = `mode: ${this.opts.overrideMode} · ${benchCount} benchmarked${runningCount > 0 ? ` · ${runningCount} running` : ""}  `;
-		const headerGap = Math.max(1, width - visibleWidth(headerTitle) - visibleWidth(modeBadge));
+		const statusBadge = `${benchCount} benchmarked${runningCount > 0 ? ` · ${runningCount} running` : ""}  `;
+		const headerGap = Math.max(1, width - visibleWidth(headerTitle) - visibleWidth(statusBadge));
 		const headerLine =
-			visibleWidth(headerTitle) + visibleWidth(modeBadge) + 1 <= width
+			visibleWidth(headerTitle) + visibleWidth(statusBadge) + 1 <= width
 				? theme.fg("accent", theme.bold(headerTitle)) +
 					" ".repeat(headerGap) +
-					theme.fg(runningCount > 0 ? "warning" : "muted", modeBadge)
+					theme.fg(runningCount > 0 ? "warning" : "muted", statusBadge)
 				: truncateToWidth(theme.fg("accent", theme.bold(headerTitle)), width);
 
 		const lines: string[] = [
@@ -761,7 +895,7 @@ export class HashlinePickerComponent {
 			for (let i = 0; i < visible.length; i++) {
 				const model = visible[i]!;
 				const absIdx = start + i;
-				const fuzzyHighlight = hasQuery ? (absIdx === 0 ? "top" : "match") : undefined;
+				const fuzzyHighlight = hasQuery ? (this.topMatchKey === modelKey(model) ? "top" : "match") : undefined;
 				lines.push(this.renderRow(model, absIdx === this.rowIndex, this.isCurrent(model), L, theme, fuzzyHighlight));
 			}
 		}
@@ -777,7 +911,7 @@ export class HashlinePickerComponent {
 			detailLine += ` ${cleanCellText(`${selected.provider}/${selected.id}`)} · ${describeDecision(this.decisionOf(selected), this.calibratedOf(selected))}`;
 			if (err) detailLine += ` · err: ${cleanCellText(err)}`;
 		}
-		const legend = "  ● hashline  ● pinned/running";
+		const legend = "  ● hashline  ● running";
 		const detailGap = width - visibleWidth(detailLine) - visibleWidth(legend);
 		if (detailGap >= 2) {
 			lines.push(
@@ -786,7 +920,7 @@ export class HashlinePickerComponent {
 					theme.fg("success", "  ●") +
 					theme.fg("dim", " hashline  ") +
 					theme.fg("warning", "●") +
-					theme.fg("dim", " pinned/running"),
+					theme.fg("dim", " running"),
 			);
 		} else {
 			lines.push(theme.fg("dim", truncateToWidth(detailLine, width)));
@@ -801,7 +935,7 @@ export class HashlinePickerComponent {
 	}
 
 	private renderBottomBar(width: number, theme: any): string {
-		const leftFull = "  Enter swap · Ctrl+S sort · Ctrl+B bench · Ctrl+U unpin · Ctrl+O mode · Tab · Esc";
+		const leftFull = "  Enter swap · Ctrl+R reset · Ctrl+S sort · Ctrl+B bench · Tab · Esc";
 		const running = this.opts.runningJobs.size;
 		let rightPlain: string;
 		let rightColor: string;
@@ -812,8 +946,11 @@ export class HashlinePickerComponent {
 				calls += j.apiCalls ?? 0;
 				tokens += j.totalTokens ?? 0;
 			}
-			const estCalls = EST_BENCH_CALLS * running;
-			const estTok = EST_BENCH_TOK_K * running;
+			const repeats = Math.max(1, Math.round(this.opts.config.benchRepeats ?? 2));
+			const defaultCalls = repeats * 4;
+			const defaultTokK = Math.round((EST_BENCH_TOK_K * repeats) / 2);
+			const estCalls = (this.opts.config.maxBenchCalls ?? defaultCalls) * running;
+			const estTok = Math.round(((this.opts.config.maxBenchTokens ?? defaultTokK * 1000) / 1000) * running);
 			rightPlain =
 				calls > 0 || tokens > 0
 					? `${GAUGE_ICON} ${calls}/~${estCalls} calls · ${fmtTokens(tokens)}/~${estTok}k tok  `
@@ -833,31 +970,44 @@ export class HashlinePickerComponent {
 	}
 
 	/** Measured speed ratio (`replaceEditMs / hashlineEditMs`), or empty string until benchmarked at least once. */
-	private fmtSpeed(m: Model<Api>): string {
+	private fmtBenchRatio(m: Model<Api>): string {
 		const s = this.measuredSpeed(m);
 		return s !== undefined ? `${s.toFixed(2)}×` : "";
 	}
 
-	private speedCell(m: Model<Api>, isSelected: boolean, theme: any, bold: (s: string) => string): Cell {
-		const text = this.fmtSpeed(m);
+	private benchRatioCell(m: Model<Api>, isSelected: boolean, theme: any, bold: (s: string) => string): Cell {
+		const text = this.fmtBenchRatio(m);
 		if (!text) return { styled: "", w: 0 };
 		const cal = this.calibratedOf(m);
 		const color = isSelected ? "accent" : cal?.use === "hashline" ? "success" : "muted";
 		return { styled: theme.fg(color, bold(text)), w: visibleWidth(text) };
 	}
 
-	private editCell(m: Model<Api>, theme: any, bold: (s: string) => string): Cell {
-		if (this.opts.overrideMode === "off") return { styled: theme.fg("muted", bold("○ off")), w: visibleWidth("○ off") };
-		const dec = this.decisionOf(m);
-		const pinned = dec.source.startsWith("pinned:");
-		const body = dec.use === "hashline" ? "● hashline" : "○ built-in";
-		const styled = theme.fg(dec.use === "hashline" ? "success" : "muted", bold(body));
-		return pinned
-			? { styled: theme.fg("warning", bold("*")) + " " + styled, w: visibleWidth(`* ${body}`) }
-			: { styled, w: visibleWidth(body) };
+	/** Output edit-payload byte savings (`-79%` when hashline is smaller, `+12%` if larger, blank until benched). */
+	private fmtSaved(m: Model<Api>): string {
+		const s = this.measuredSaved(m);
+		if (s === undefined) return "";
+		const pct = Math.round(s * 100);
+		if (pct > 0) return `-${pct}%`;
+		if (pct < 0) return `+${Math.abs(pct)}%`;
+		return "0%";
 	}
 
-	private benchCell(m: Model<Api>, theme: any, bold: (s: string) => string): Cell {
+	private savedCell(m: Model<Api>, isSelected: boolean, theme: any, bold: (s: string) => string): Cell {
+		const text = this.fmtSaved(m);
+		if (!text) return { styled: "", w: 0 };
+		const s = this.measuredSaved(m) ?? 0;
+		const color = isSelected ? "accent" : s >= 0.4 ? "success" : s >= 0 ? "muted" : "warning";
+		return { styled: theme.fg(color, bold(text)), w: visibleWidth(text) };
+	}
+
+	private editCell(m: Model<Api>, theme: any, bold: (s: string) => string): Cell {
+		const dec = this.decisionOf(m);
+		const body = dec.use === "hashline" ? "● hashline" : "○ built-in";
+		return { styled: theme.fg(dec.use === "hashline" ? "success" : "muted", bold(body)), w: visibleWidth(body) };
+	}
+
+	private recommendedCell(m: Model<Api>, theme: any, bold: (s: string) => string): Cell {
 		const job = this.opts.runningJobs.get(modelKey(m));
 		if (job) return formatBenchGauge(job, (this.opts.now ?? Date.now)(), theme, bold);
 		const mk = (text: string, color: string): Cell => ({ styled: theme.fg(color, bold(text)), w: visibleWidth(text) });
@@ -901,12 +1051,12 @@ export class HashlinePickerComponent {
 			return hasQuery && matches ? theme.bg("customMessageBg", styled) : styled;
 		};
 
-		const pinned = [FREQUENT_TAB, BENCHMARKED_TAB, ALL_TAB];
-		const pinnedPart = pinned.map(segment).join(SEP);
-		const pinnedW = pinned.reduce((sum, key) => sum + visibleWidth(labelOf(key)), 0) + (pinned.length - 1) * SEP_W;
+		const fixedTabs = [FREQUENT_TAB, BENCHMARKED_TAB, ALL_TAB];
+		const fixedPart = fixedTabs.map(segment).join(SEP);
+		const fixedW = fixedTabs.reduce((sum, key) => sum + visibleWidth(labelOf(key)), 0) + (fixedTabs.length - 1) * SEP_W;
 		const providers = this.categories;
-		if (!providers.length || width - 2 - pinnedW < 14) {
-			return truncateToWidth("  " + pinnedPart, width);
+		if (!providers.length || width - 2 - fixedW < 14) {
+			return truncateToWidth("  " + fixedPart, width);
 		}
 
 		const segW = providers.map((key) => visibleWidth(labelOf(key)));
@@ -921,7 +1071,7 @@ export class HashlinePickerComponent {
 			const reserve =
 				(pass === 0 ? 3 : leftHidden > 0 ? visibleWidth("<< ") : 0) +
 				(pass === 0 ? 3 : rightHidden > 0 ? visibleWidth(" >>") : 0);
-			const avail = Math.max(0, width - 2 - pinnedW - SEP_W - reserve);
+			const avail = Math.max(0, width - 2 - fixedW - SEP_W - reserve);
 			lo = Math.min(Math.max(0, this.providerLo), providers.length - 1);
 			if (activeIdx >= 0) {
 				if (activeIdx < lo) lo = activeIdx;
@@ -937,7 +1087,7 @@ export class HashlinePickerComponent {
 		const leftPart = lo > 0 ? theme.fg("dim", "<< ") : "";
 		const rightPart = providers.length - 1 - hi > 0 ? theme.fg("dim", " >>") : "";
 		const providerPart = providers.slice(lo, hi + 1).map(segment).join(SEP);
-		return truncateToWidth("  " + pinnedPart + SEP + leftPart + providerPart + rightPart, width);
+		return truncateToWidth("  " + fixedPart + SEP + leftPart + providerPart + rightPart, width);
 	}
 
 	private renderRow(
@@ -950,10 +1100,9 @@ export class HashlinePickerComponent {
 	): string {
 		const bold = (s: string) => (isSelected ? theme.bold(s) : s);
 		const dec = this.decisionOf(model);
-		const pinned = dec.source.startsWith("pinned:");
 		const running = this.opts.runningJobs.has(modelKey(model));
-		// Big dot glyph after the model name: gold when pinned/running, green for hashline, dim for built-in/off.
-		const dotColor = pinned || running ? "warning" : dec.use === "hashline" ? "success" : "dim";
+		// Big dot glyph after the model name: gold when running a benchmark, green for hashline, dim for built-in/off.
+		const dotColor = running ? "warning" : dec.use === "hashline" ? "success" : "dim";
 		const rowColor = isSelected ? "accent" : isCurrent ? "success" : "text";
 		const sideColor = isSelected ? "accent" : isCurrent ? "success" : "muted";
 
@@ -975,9 +1124,10 @@ export class HashlinePickerComponent {
 		const line = this.compose(L, { styled: theme.fg(rowColor, isSelected ? "▶ " : "  "), w: 2 }, {
 			model: modelCell,
 			provider: { styled: theme.fg(sideColor, provText), w: visibleWidth(provText) },
-			speed: this.speedCell(model, isSelected, theme, bold),
+			bench: this.benchRatioCell(model, isSelected, theme, bold),
+			saved: this.savedCell(model, isSelected, theme, bold),
 			edit: this.editCell(model, theme, bold),
-			bench: this.benchCell(model, theme, bold),
+			recommended: this.recommendedCell(model, theme, bold),
 		});
 		const fuzzyBg =
 			fuzzyHighlight === "top" ? "searchMatchBg" : fuzzyHighlight === "match" ? "toolPendingBg" : undefined;
@@ -991,14 +1141,22 @@ export class HashlinePickerComponent {
 
 export interface OpenHashlineMenuOptions {
 	ctx: ExtensionContext;
-	getOverrideMode: () => OverrideMode;
-	setOverrideMode: (m: OverrideMode) => void;
 	runningJobs: Map<string, BenchJobState>;
 	lastBenchErrors: Map<string, string>;
+	spawnBench?: typeof spawn;
 }
 
+interface ActiveMenuView {
+	onConfigChanged(cfg: HashlineConfig): void;
+	requestRender(): void;
+}
+
+/** Tracks whichever `/hashline` menu instance is currently open for a `runningJobs` map, across close/reopen cycles. */
+const activeViews = new WeakMap<Map<string, BenchJobState>, ActiveMenuView>();
+let nextJobGen = 0;
+
 export async function openHashlineMenu(opts: OpenHashlineMenuOptions): Promise<void> {
-	const { ctx, getOverrideMode, setOverrideMode, runningJobs, lastBenchErrors } = opts;
+	const { ctx, runningJobs, lastBenchErrors, spawnBench = spawn } = opts;
 	const agentDir = getAgentDir();
 
 	const refreshPromise = Promise.resolve(ctx.modelRegistry.refresh());
@@ -1013,13 +1171,24 @@ export async function openHashlineMenu(opts: OpenHashlineMenuOptions): Promise<v
 	}
 
 	const usage = scanModelUsage(agentDir);
-	let config = loadConfigSync(agentDir);
+	let config = loadConfigSync(agentDir, true, true);
 
 	await ctx.ui.custom<void>((tui, theme, _kb, done) => {
 		let closed = false;
-		let jobSeq = 0;
-
 		let picker: HashlinePickerComponent;
+
+		const view: ActiveMenuView = {
+			onConfigChanged(freshCfg) {
+				if (closed) return;
+				config = freshCfg;
+				picker.syncState({ config: freshCfg });
+				tui.requestRender();
+			},
+			requestRender() {
+				if (!closed) tui.requestRender();
+			},
+		};
+		activeViews.set(runningJobs, view);
 
 		const tick = setInterval(() => {
 			if (!closed && runningJobs.size > 0) {
@@ -1032,33 +1201,34 @@ export async function openHashlineMenu(opts: OpenHashlineMenuOptions): Promise<v
 			if (closed) return;
 			closed = true;
 			clearInterval(tick);
+			if (activeViews.get(runningJobs) === view) {
+				activeViews.delete(runningJobs);
+			}
 			done();
 		};
 
+		const isManualMatch = (r: any, key: string) =>
+			(r?.manual ?? r?.pinned) === true && String(r?.match ?? "").toLowerCase() === key;
+
 		const toggleModel = (model: Model<Api>, nextUse: EditChoice): HashlineConfig => {
 			const key = modelKey(model);
-			const fresh = loadConfigSync(agentDir);
-			fresh.rules = (fresh.rules ?? []).filter((r) => !(r.pinned && r.match.toLowerCase() === key));
-			fresh.rules.unshift({ match: key, use: nextUse, pinned: true, note: "pinned in /hashline menu" });
+			const fresh = loadConfigSync(agentDir, true, true);
+			fresh.rules = (fresh.rules ?? []).filter((r) => !isManualMatch(r, key));
+			fresh.rules.unshift({ match: key, use: nextUse, manual: true, note: "set in /hashline menu" });
 			saveConfigSync(fresh, agentDir);
 			config = fresh;
 			return fresh;
 		};
 
-		const unpinModel = (model: Model<Api>): HashlineConfig => {
+		const resetModel = (model: Model<Api>): HashlineConfig => {
 			const key = modelKey(model);
-			const fresh = loadConfigSync(agentDir);
-			fresh.rules = (fresh.rules ?? []).filter((r) => !(r.pinned && r.match.toLowerCase() === key));
+			lastBenchErrors.delete(key);
+			const fresh = loadConfigSync(agentDir, true, true);
+			fresh.rules = (fresh.rules ?? []).filter((r) => !isManualMatch(r, key));
+			delete fresh.calibrated[key];
 			saveConfigSync(fresh, agentDir);
 			config = fresh;
 			return fresh;
-		};
-
-		const cycleMode = (): OverrideMode => {
-			const order: OverrideMode[] = ["auto", "all", "force", "off"];
-			const next = order[(order.indexOf(getOverrideMode()) + 1) % order.length]!;
-			setOverrideMode(next);
-			return next;
 		};
 
 		const toggleBenchmark = (model: Model<Api>) => {
@@ -1075,11 +1245,11 @@ export async function openHashlineMenu(opts: OpenHashlineMenuOptions): Promise<v
 				return;
 			}
 
-			const gen = ++jobSeq;
+			const gen = ++nextJobGen;
 			lastBenchErrors.delete(key);
-			const child = spawn(
+			const child = spawnBench(
 				process.execPath,
-				[CALIBRATE_SCRIPT, "--unpin", "--progress", "--concurrency", "1", `${model.provider}/${model.id}`],
+				[CALIBRATE_SCRIPT, "--reset", "--progress", "--concurrency", "1", `${model.provider}/${model.id}`],
 				{
 					cwd: path.dirname(CALIBRATE_SCRIPT),
 					env: { ...process.env, PI_HASHLINE_CONFIG: resolveConfigPath(agentDir) },
@@ -1087,11 +1257,12 @@ export async function openHashlineMenu(opts: OpenHashlineMenuOptions): Promise<v
 					detached: true,
 				},
 			);
+			const initialTotalSteps = Math.max(1, Math.round(config.benchRepeats ?? 2)) * 4;
 			const job: BenchJobState = {
 				startedAt: Date.now(),
 				gen,
 				doneSteps: 0,
-				totalSteps: 8,
+				totalSteps: initialTotalSteps,
 				apiCalls: 0,
 				totalTokens: 0,
 				proc: child,
@@ -1111,7 +1282,7 @@ export async function openHashlineMenu(opts: OpenHashlineMenuOptions): Promise<v
 						if (typeof p.total === "number") cur.totalSteps = p.total;
 						if (typeof p.calls === "number") cur.apiCalls = p.calls;
 						if (typeof p.tokens === "number") cur.totalTokens = p.tokens;
-						if (!closed) tui.requestRender();
+						activeViews.get(runningJobs)?.requestRender();
 					}
 				} catch {}
 			};
@@ -1133,17 +1304,16 @@ export async function openHashlineMenu(opts: OpenHashlineMenuOptions): Promise<v
 				if (curJob?.gen === gen) {
 					runningJobs.delete(key);
 				}
-				const refreshedCfg = loadConfigSync(agentDir);
+				const refreshedCfg = loadConfigSync(agentDir, true, true);
 				const skipMatch = /\[SKIP\]\s+\S+:\s+(.+)/.exec(stdout);
 				if (code !== 0 || skipMatch) {
 					lastBenchErrors.set(key, (skipMatch?.[1] || stderr.trim() || `exit ${code}`).slice(0, 120));
 				} else {
 					lastBenchErrors.delete(key);
 				}
-				if (!closed) {
-					config = refreshedCfg;
-					picker.syncState({ config: refreshedCfg });
-					tui.requestRender();
+				const openView = activeViews.get(runningJobs);
+				if (openView) {
+					openView.onConfigChanged(refreshedCfg);
 				} else {
 					const entry = refreshedCfg.calibrated?.[key];
 					if (entry) {
@@ -1163,12 +1333,10 @@ export async function openHashlineMenu(opts: OpenHashlineMenuOptions): Promise<v
 			currentModel: ctx.model ?? undefined,
 			usage,
 			config,
-			overrideMode: getOverrideMode(),
 			runningJobs,
 			lastBenchErrors,
 			onToggleModel: toggleModel,
-			onUnpinModel: unpinModel,
-			onCycleOverrideMode: cycleMode,
+			onResetModel: resetModel,
 			onToggleBenchmark: toggleBenchmark,
 			onClose: close,
 		});

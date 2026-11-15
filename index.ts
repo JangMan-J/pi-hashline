@@ -5,12 +5,8 @@
  * `hashlineFormatNumberedLines`) in-process via N-API:
  * - Zero `oldText` echoed over the wire (`[PATH#TAG]` + `PUT N.=M:`, `PUT N*:`, `<N:`, `>N:`, `>$:`, `CUT`, `MV`, `REM`)
  * - 4-hex content snapshot tags + seen-line guard + AST parse-regression warning
- * - Model-aware activation (`PI_HASHLINE=auto|all|force|off`, or cycled with Ctrl+O in the `/hashline` picker):
- *   - `auto` (default): swaps `edit` -> `hashline_edit` on Gemini (`google*`, `antigravity/gemini-*`) and OpenAI
- *     (`openai*`, excluding `spark`), keeping stock `edit(oldText, newText)` on Claude, Kimi, DeepSeek, MiniMax, Qwen.
- *   - `all` / `1` / `on`: enables `hashline_edit` on Claude too (still keeping Kimi/DeepSeek/MiniMax on `edit` unless `force`).
- *   - `force`: enables `hashline_edit` on every model unconditionally.
- *   - `off` / `0`: disables `hashline_edit` everywhere.
+ * - Per-model routing configured in `~/.pi/agent/hashline.json` and managed via `/hashline` (Alt+H):
+ *   manual per-model selection > benchmark verdict > default family rules.
  */
 
 import * as fs from "node:fs";
@@ -23,10 +19,8 @@ import { getAgentDir, withFileMutationQueue } from "@earendil-works/pi-coding-ag
 import type { KeyId } from "@earendil-works/pi-tui";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { loadConfigSync, type OverrideMode, resolveModelDecision } from "./config.ts";
+import { loadConfigSync, resolveModelDecision } from "./config.ts";
 import { type BenchJobState, openHashlineMenu } from "./picker.ts";
-
-type HashlineMode = OverrideMode;
 
 const DEFAULT_SHORTCUT = "alt+h";
 
@@ -123,21 +117,15 @@ export function loadOmpNatives(): OmpNatives {
 	throw new Error(`pi-hashline: failed to load native bindings (${candidates.join(", ")}): ${String(lastErr)}`);
 }
 
-function parseMode(raw: string | undefined): HashlineMode {
-	const v = (raw ?? "").trim().toLowerCase();
-	if (v === "0" || v === "off" || v === "false" || v === "replace") return "off";
-	if (v === "force") return "force";
-	if (v === "1" || v === "on" || v === "true" || v === "all") return "all";
-	return "auto";
-}
-
 export function shouldUseHashline(
-	mode: HashlineMode,
 	model: { provider?: string; id?: string } | undefined,
 	agentDir?: string,
 ): boolean {
+	const env = (process.env.PI_HASHLINE ?? "").trim().toLowerCase();
+	if (env === "0" || env === "off" || env === "false" || env === "replace") return false;
+	if (env === "force") return true;
 	const cfg = loadConfigSync(agentDir);
-	return resolveModelDecision(cfg, mode, model).use === "hashline";
+	return resolveModelDecision(cfg, model).use === "hashline";
 }
 
 function normalizeToLF(s: string): string {
@@ -157,14 +145,14 @@ function formatDisplayPath(absPath: string, cwd: string): string {
 
 const READ_FOOTER_RE = /\n\n(\[(?:Showing lines [^\]]+|\d+ more lines in file\.[^\]]*)\])$/;
 
-const hashlineSchema = Type.Object({
+export const hashlineSchema = Type.Object({
 	input: Type.String({
 		description:
 			"One or more `[PATH#TAG]` sections with hashline operations (`PUT N.=M:`, `PUT N*:`, `PUT <N:`, `PUT >N:`, `PUT >$:`, `CUT`, `MV`, `REM`) and `+TEXT` body rows. Copy the 4-hex `#TAG` from the latest `read` or `hashline_edit` output.",
 	}),
 });
 
-const COMPACT_DESCRIPTION = `Edit existing files with line-anchored hashline patches (no oldText echoed; use \`write\` for new files).
+export const COMPACT_DESCRIPTION = `Edit existing files with line-anchored hashline patches (no oldText echoed; use \`write\` for new files).
 
 Each file section starts with \`[PATH#TAG]\`, copying the 4-hex \`TAG\` from the latest \`read\` or \`hashline_edit\` result. All line numbers refer to that tagged snapshot (never shifted by earlier hunks in the same call):
 
@@ -196,8 +184,7 @@ function appendStatsRow(row: Record<string, unknown>): void {
 }
 
 export default function piHashlineExtension(pi: ExtensionAPI): void {
-	let mode: HashlineMode = parseMode(process.env.PI_HASHLINE);
-	let storeInstance: ReturnType<OmpNatives["EditStore"]> | undefined;
+	let storeInstance: InstanceType<OmpNatives["EditStore"]> | undefined;
 	let lastSessionFile: string | undefined;
 	let activeThisRun = false;
 
@@ -218,7 +205,7 @@ export default function piHashlineExtension(pi: ExtensionAPI): void {
 	});
 
 	pi.on("before_agent_start", (event, ctx) => {
-		activeThisRun = shouldUseHashline(mode, ctx.model);
+		activeThisRun = shouldUseHashline(ctx.model);
 		const opts = event.systemPromptOptions;
 		if (!opts?.selectedTools) return undefined;
 		const hasEdit = opts.selectedTools.includes("edit");
@@ -481,18 +468,14 @@ export default function piHashlineExtension(pi: ExtensionAPI): void {
 	const openMenu = async (ctx: ExtensionContext) => {
 		await openHashlineMenu({
 			ctx,
-			getOverrideMode: () => mode,
-			setOverrideMode: (next) => {
-				mode = next;
-			},
 			runningJobs,
 			lastBenchErrors,
 		});
-		activeThisRun = shouldUseHashline(mode, ctx.model);
+		activeThisRun = shouldUseHashline(ctx.model);
 	};
 
 	pi.registerCommand("hashline", {
-		description: "Open the Hashline edit routing & benchmark picker (Enter swap, Ctrl+S sort, Ctrl+B bench, Ctrl+O mode, Tab facets)",
+		description: "Open the Hashline edit routing & benchmark picker (Enter swap, Ctrl+R reset, Ctrl+S sort, Ctrl+B bench)",
 		handler: async (_args, ctx) => {
 			await openMenu(ctx);
 		},

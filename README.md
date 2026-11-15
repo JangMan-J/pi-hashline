@@ -1,4 +1,4 @@
-# pi-hashline
+# @jangmanj/pi-hashline
 
 `oh-my-pi`'s native Rust `hashline` edit engine (`@oh-my-pi/pi-natives` N-API addon, MIT) packaged as a Pi extension, with a user-editable routing config (`~/.pi/agent/hashline.json`) and a fast deterministic calibrator (`calibrate.mjs`).
 
@@ -6,34 +6,31 @@ Instead of echoing `oldText` and matching whitespace, `read` prefixes text files
 
 ## Configuration (`~/.pi/agent/hashline.json`)
 
-Created automatically on first load (override path with `PI_HASHLINE_CONFIG`). `use` / `defaultUse` accept `"hashline"` or `"built-in"` (legacy `"replace"` is read as `"built-in"`). Routing precedence in `auto` mode:
+Created automatically on first load (override path with `PI_HASHLINE_CONFIG`). `use` / `defaultUse` accept `"hashline"` or `"built-in"` (legacy `"replace"` is read as `"built-in"`). Routing precedence:
 
-1. **Pinned rules** (`"pinned": true` in `rules`, hand-edited or set with `Enter` in the picker)
-2. **Calibrated results** (`calibrated["provider/model"]`, written by `calibrate.mjs` or `Ctrl+B` in the picker)
-3. **Family/model glob rules** (`rules`, longest match wins, e.g. `*gemini*`, `openai-codex/*`, `anthropic/*`, `kimi*`)
+1. **Manual selection** (`"manual": true` in `rules`, toggled with `Enter` in `/hashline`)
+2. **Benchmark verdict** (`calibrated["provider/model"]`, written by `Ctrl+B` or `calibrate.mjs`)
+3. **Default family rules** (`rules`, longest match wins, e.g. `*gemini*`, `openai-codex/*`, `anthropic/*`, `kimi*`)
 4. **`defaultUse`** (`"built-in"` or `"hashline"`)
-
-The session mode starts from `PI_HASHLINE` (`auto` default, `all`, `force`, `off`) and is cycled in the picker.
 
 ## Picker (`/hashline`, Alt+H)
 
-`/hashline` (no arguments) and Alt+H open the routing and benchmark picker (rebind with `"pi-hashline": { "shortcut": ... }` in `settings.json`; `false` disables it). Tabs: **Frequent** (current, favorite, previously used, benchmarked or pinned models), **Benchmarked**, **All**, then one tab per provider.
+`/hashline` (no arguments) and Alt+H open the routing and benchmark picker (rebind with `"pi-hashline": { "shortcut": ... }` in `settings.json`; `false` disables it). Tabs: **Frequent** (current, favorite, previously used, benchmarked, or manually overridden models), **Benchmarked**, **All**, then one tab per provider.
 
-Columns: **Model** (`●` green = hashline, dim = built-in/off, gold = pinned/running), **Provider** (cross-provider tabs only), **Speed** (measured edit speedup such as `2.00×`; blank until benchmarked), **Edit** (`● hashline` / `○ built-in`, `*` = pinned), **Bench** (`✓ hashline`, `✓ built-in`, `✗ failed`, `—`, or a live Nerd Font gauge ` ███░░░ 4/8`). The bottom right shows the average measured cost of past benchmarks (`bench: ~10 calls · ~35k tok (avg of 3)`), a labelled estimate when none is recorded, and live calls/tokens while a benchmark runs.
+Columns: **Model** (`●` green = hashline, dim = built-in, gold = running benchmark), **Provider** (cross-provider tabs only), **Bench** (measured median edit speedup such as `2.00×`; blank until benchmarked), **Saved** (output edit-payload byte savings such as `-79%`; blank until benchmarked), **Edit** (`● hashline` / `○ built-in`), **Recommended** (`✓ hashline`, `✓ built-in`, `✗ failed`, `—`, or a live Nerd Font gauge ` ███░░░ 4/8`). The bottom right shows the average measured cost of past benchmarks (`bench: ~8 calls · ~58k tok (avg of 3)`), a fallback estimate (`~8 calls · ~60k tok (est.)`) when none is recorded, and live calls/tokens while a benchmark runs.
 
-Keys: `Enter` switch edit tool (pins the model) · `Ctrl+B` run/stop benchmark · `Ctrl+U` unpin · `Ctrl+O` cycle mode (auto → all → force → off; `Ctrl+G` is left to Zellij) · `Ctrl+S` cycle sort (default → Speed → Edit → Bench → Model → Provider) · `Tab`/`Shift+Tab` or `←`/`→` tabs · type to search · `Esc` close.
+Keys: `Enter` switch edit tool · `Ctrl+R` (or `Ctrl+X`) reset model (clears manual override & benchmark) · `Ctrl+B` run/stop benchmark · `Ctrl+S` cycle `▲` then `▼` across visible columns left to right (Model, Provider, Bench, Saved, Edit, Recommended, plus tab default when distinct) · `Tab`/`Shift+Tab` or `←`/`→` tabs · type to search · `Esc` close.
 
 ## Deterministic Calibrator (`calibrate.mjs`)
 
-Runs two bash-free, 2-turn (`read` -> `edit`) multi-hunk refactoring micro-tasks head-to-head (`built-in` vs `hashline`, starting both arms simultaneously per task and verifying output with strict Node assertions in `<20 ms`), then writes each model's measured speed ratio, API calls, token usage, and routing verdict into `~/.pi/agent/hashline.json`:
-
+Runs pre-seeded 1-turn multi-hunk refactoring micro-tasks in-process via `ModelRuntime.streamSimple()` (zero subprocess cold starts, no wasted `read` / `"done"` turns, HTTP 429/5xx retry backoffs excluded from `editMs`, and alternating arm order across `--repeats 2` / `benchRepeats` with median scoring). Benchmarks never auto-abort when exceeding estimated calls, tokens, or time unless `"stopOnOverrun": true` (optional `maxBenchCalls`, `maxBenchTokens`, `benchTimeoutSec`) is enabled in `hashline.json` or `--stop-on-overrun` is passed:
 ```sh
-# Calibrate default roster across major provider families (~45-90s total)
+# Calibrate default roster across major provider families
 node calibrate.mjs
 
-# Calibrate specific models or preview without writing hashline.json
+# Calibrate specific models (or increase repeats for tighter medians)
 node calibrate.mjs openai-codex/gpt-6-astra kimi-coding/k3.1-pro-highspeed
-node calibrate.mjs --thinking high --min-speedup 1.15 --dry-run
+node calibrate.mjs --repeats 3 --thinking high --min-speedup 1.15 --dry-run
 ```
 
 ## Verify & benchmark

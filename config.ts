@@ -3,14 +3,13 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 export type EditChoice = "hashline" | "replace";
-export type OverrideMode = "auto" | "all" | "force" | "off";
 
 export interface ModelRule {
 	/** Case-insensitive glob matched against `provider/id` and bare `id` (e.g. `antigravity/gemini-*`, `*astra*`, `anthropic/*`). */
 	match: string;
 	use: EditChoice;
-	/** Pinned rules override `calibrated` results so hand-edits in hashline.json always win. */
-	pinned?: boolean;
+	/** Manual per-model override set with Enter in /hashline (cleared with Ctrl+R); overrides calibrated verdicts. */
+	manual?: boolean;
 	note?: string;
 }
 
@@ -37,6 +36,19 @@ export interface HashlineConfig {
 	defaultUse: EditChoice;
 	/** Minimum edit-turn speedup (`replaceEditMs / hashlineEditMs`) required for `calibrate.mjs` to select `hashline` when both arms pass. */
 	minSpeedup: number;
+	/** Number of paired repeats per task during calibration (median across repeats reduces single-run jitter; default 2 = 8 1-turn calls). */
+	benchRepeats?: number;
+	/**
+	 * Abort a benchmark if it exceeds `maxBenchCalls`, `maxBenchTokens`, or `benchTimeoutSec`.
+	 * Off (`false`) by default so slow or retrying models run to completion unless stopped with Ctrl+B.
+	 */
+	stopOnOverrun?: boolean;
+	/** Optional API-call ceiling per model benchmark when `stopOnOverrun` is true (defaults to 24). */
+	maxBenchCalls?: number;
+	/** Optional token ceiling per model benchmark when `stopOnOverrun` is true (defaults to 120000). */
+	maxBenchTokens?: number;
+	/** Optional per-trial timeout in seconds when `stopOnOverrun` is true (defaults to 300). */
+	benchTimeoutSec?: number;
 	rules: ModelRule[];
 	calibrated: Record<string, CalibratedEntry>;
 }
@@ -45,6 +57,7 @@ export const DEFAULT_CONFIG: HashlineConfig = {
 	version: 1,
 	defaultUse: "replace",
 	minSpeedup: 1.15,
+	stopOnOverrun: false,
 	rules: [
 		{ match: "anthropic/*", use: "replace", note: "Claude is RL-tuned for tight oldText anchors (97.7% success, 1.3x inflation)" },
 		{ match: "*/claude-*", use: "replace" },
@@ -111,71 +124,78 @@ export function matchBestRule(rules: readonly ModelRule[], fullModel: string, ba
 
 export function resolveModelDecision(
 	config: HashlineConfig,
-	overrideMode: OverrideMode,
 	model: { provider?: string; id?: string } | undefined,
 ): { use: EditChoice; source: string } {
-	if (overrideMode === "off") return { use: "replace", source: "override:off" };
-	if (overrideMode === "force") return { use: "hashline", source: "override:force" };
-
 	const provider = (model?.provider ?? "").trim().toLowerCase();
 	const id = (model?.id ?? "").trim().toLowerCase();
 	const full = provider && id ? `${provider}/${id}` : id || provider;
 	if (!full) {
-		return { use: overrideMode === "all" ? "hashline" : config.defaultUse, source: "no-model" };
+		return { use: config.defaultUse ?? "replace", source: "no-model" };
 	}
 
-	// 1. User-pinned rules always win.
-	const pinnedRule = matchBestRule(
-		(config.rules ?? []).filter(r => r.pinned === true),
+	// 1. Manual per-model overrides always win until reset.
+	const manualRule = matchBestRule(
+		(config.rules ?? []).filter(r => (r.manual ?? (r as any).pinned) === true),
 		full,
 		id,
 	);
-	if (pinnedRule) return { use: pinnedRule.use, source: `pinned:${pinnedRule.match}` };
+	if (manualRule) return { use: manualRule.use, source: `manual:${manualRule.match}` };
 
-	// 2. `overrideMode === "all"` enables hashline on Claude/GPT/Gemini while still respecting explicit non-Claude replace fallbacks unless calibrated faster.
-	if (overrideMode === "all") {
-		const cal = config.calibrated?.[full];
-		if (cal) return { use: cal.use, source: `calibrated:${full}` };
-		const rule = matchBestRule(config.rules ?? [], full, id);
-		if (rule && rule.use === "replace" && !rule.match.includes("anthropic") && !rule.match.includes("claude")) {
-			return { use: "replace", source: `rule:${rule.match}` };
-		}
-		return { use: "hashline", source: "override:all" };
-	}
-
-	// 3. Empirical calibration result for this exact `provider/id` beats unpinned family wildcards.
+	// 2. Empirical calibration result for this exact `provider/id` beats default family wildcards.
 	const calibrated = config.calibrated?.[full];
 	const calUse = normalizeChoice(calibrated?.use);
 	if (calibrated && calUse) {
 		return { use: calUse, source: `calibrated:${full} (${calibrated.speedup}x)` };
 	}
 
-	// 4. Unpinned family/model rules (longest match wins).
+	// 3. Default family/model rules (longest match wins).
 	const familyRule = matchBestRule(config.rules ?? [], full, id);
 	if (familyRule) return { use: familyRule.use, source: `rule:${familyRule.match}` };
 
 	return { use: config.defaultUse ?? "replace", source: "default" };
 }
 
-let cachedFile: { path: string; mtimeMs: number; config: HashlineConfig } | undefined;
+let cachedFile: { path: string; mtimeMs: number; size: number; config: HashlineConfig } | undefined;
 
-export function loadConfigSync(agentDir?: string, seedIfMissing = true): HashlineConfig {
+export function loadConfigSync(agentDir?: string, seedIfMissing = true, forceReload = false): HashlineConfig {
 	const file = resolveConfigPath(agentDir);
 	try {
 		const st = fs.statSync(file);
-		if (cachedFile && cachedFile.path === file && cachedFile.mtimeMs === st.mtimeMs) {
-			return cachedFile.config;
+		if (
+			!forceReload &&
+			cachedFile &&
+			cachedFile.path === file &&
+			cachedFile.mtimeMs === st.mtimeMs &&
+			cachedFile.size === st.size
+		) {
+			return structuredClone(cachedFile.config);
 		}
 		const parsed = JSON.parse(fs.readFileSync(file, "utf8")) as Partial<HashlineConfig>;
+		const posNum = (v: unknown): number | undefined =>
+			typeof v === "number" && Number.isFinite(v) && v > 0 ? v : undefined;
+		const normRules = Array.isArray(parsed.rules)
+			? parsed.rules.map((r: any) => {
+					if (r && typeof r === "object" && r.pinned === true && r.manual === undefined) {
+						const { pinned: _legacy, ...rest } = r;
+						return { ...rest, manual: true } as ModelRule;
+					}
+					return r as ModelRule;
+				})
+			: DEFAULT_CONFIG.rules;
 		const config: HashlineConfig = {
 			version: 1,
 			defaultUse: normalizeChoice(parsed.defaultUse) ?? "replace",
-			minSpeedup: typeof parsed.minSpeedup === "number" && parsed.minSpeedup > 0 ? parsed.minSpeedup : 1.15,
-			rules: Array.isArray(parsed.rules) ? parsed.rules : DEFAULT_CONFIG.rules,
+	minSpeedup: posNum(parsed.minSpeedup) ?? 1.15,
+			...(posNum(parsed.benchRepeats) ? { benchRepeats: Math.round(posNum(parsed.benchRepeats)!) } : {}),
+			stopOnOverrun: parsed.stopOnOverrun === true,
+			...(posNum(parsed.maxBenchCalls) ? { maxBenchCalls: posNum(parsed.maxBenchCalls) } : {}),
+			...(posNum(parsed.maxBenchTokens) ? { maxBenchTokens: posNum(parsed.maxBenchTokens) } : {}),
+			...(posNum(parsed.benchTimeoutSec) ? { benchTimeoutSec: posNum(parsed.benchTimeoutSec) } : {}),
+			rules: normRules,
 			calibrated: parsed.calibrated && typeof parsed.calibrated === "object" ? parsed.calibrated : {},
 		};
-		cachedFile = { path: file, mtimeMs: st.mtimeMs, config };
-		return config;
+		cachedFile = { path: file, mtimeMs: st.mtimeMs, size: st.size, config };
+		return structuredClone(config);
 	} catch {
 		const fresh: HashlineConfig = structuredClone(DEFAULT_CONFIG);
 		if (seedIfMissing) {
@@ -195,7 +215,7 @@ export function saveConfigSync(config: HashlineConfig, agentDir?: string): strin
 	fs.renameSync(tmp, file);
 	try {
 		const st = fs.statSync(file);
-		cachedFile = { path: file, mtimeMs: st.mtimeMs, config };
+		cachedFile = { path: file, mtimeMs: st.mtimeMs, size: st.size, config: structuredClone(config) };
 	} catch {}
 	return file;
 }
