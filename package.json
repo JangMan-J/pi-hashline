@@ -1,6 +1,6 @@
 {
   "name": "@jangmanj/pi-hashline",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "type": "module",
   "description": "oh-my-pi hashline edit mode ported as a Pi coding-agent extension",
   "license": "MIT",
