@@ -147,7 +147,7 @@ const READ_FOOTER_RE = /\n\n(\[(?:Showing lines [^\]]+|\d+ more lines in file\.[
 export const hashlineSchema = Type.Object({
 	input: Type.String({
 		description:
-			"One or more `[PATH#TAG]` sections with hashline operations (`PUT N.=M:`, `PUT N*:`, `PUT <N:`, `PUT >N:`, `PUT >$:`, `CUT`, `MV`, `REM`) and `+TEXT` body rows. Copy the 4-hex `#TAG` from the latest `read` or `hashline_edit` output.",
+			"One or more `[PATH#TAG]` sections with hashline operations (`PUT N.=M:`, `PUT N*:`, `PUT <N:`, `PUT >N:`, `PUT >$:`, `CUT`, `MV`, `REM`) and `+TEXT` body rows. Copy the 4-hex `#TAG` from the latest `read` or `hashline_edit` output of that exact path; prefer `PUT <N:`/`PUT >N:` for insertions and `PUT N*:` for whole blocks.",
 	}),
 });
 
@@ -172,7 +172,9 @@ Operations:
 Rules:
 - Every body row on \`:\` ops starts with \`+\` followed by verbatim text including indentation; lone \`+\` writes a blank line. Literal leading \`-\` or \`+\` in content is escaped as \`+-...\` or \`++...\`.
 - Never emit removed \`-\` lines or unchanged context lines. Split non-adjacent changes into separate \`PUT\`/\`CUT\` ops under the same \`[PATH#TAG]\` header.
-- Only anchor lines visible in a prior \`read\`; after every edit the file's \`#TAG\` and line numbers update (use the returned header/preview or re-\`read\`).`;
+- Use \`PUT <N:\` or \`PUT >N:\` for pure insertions (comments, attributes, new lines) rather than rewriting existing lines with \`PUT N.=M:\`; prefer \`PUT N*:\` / \`CUT N*\` when replacing or deleting an entire block.
+- \`PUT N.=M:\` and \`CUT N.=M\` are inclusive on both \`N\` and \`M\` — verify line \`N\` is the first changed line and line \`M\` includes any trailing delimiter or chained tail (\`;\`, \`}\`, \`.collect();\`).
+- Anchor lines must have been displayed on that exact target path (not a copied source path, and not across folded \`…\` or unread gaps in \`read\` or edit previews); after every edit the file's \`#TAG\` and line numbers update (use the returned header/preview or re-\`read\`).`;
 
 function appendStatsRow(row: Record<string, unknown>): void {
 	try {
