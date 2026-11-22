@@ -37,7 +37,7 @@
   },
   "dependencies": {
     "@oh-my-pi/pi-natives": "18.20.0",
-    "@oh-my-pi/pi-natives-linux-x64": "^18.20.0"
+    "@oh-my-pi/pi-natives-linux-x64": "^19.0.0"
   },
   "repository": {
     "type": "git",
